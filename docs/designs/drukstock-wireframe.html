@@ -1,0 +1,88 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>DrukStock wireframe</title>
+<style>
+  body{font-family:-apple-system,system-ui,sans-serif;background:#fff;color:#222;margin:24px}
+  h1{font-size:16px;font-weight:600;margin:0 0 4px}
+  .note{font-size:12px;color:#777;margin:0 0 20px}
+  .row{display:flex;gap:32px;align-items:flex-start}
+  .col{width:300px}
+  .label{font-size:12px;color:#777;margin-bottom:6px}
+  .phone{width:300px;height:620px;border:1.5px solid #555;border-radius:28px;padding:16px 14px;box-sizing:border-box;position:relative;overflow:hidden}
+  .box{border:1px dashed #999;border-radius:6px;padding:8px;margin-bottom:8px;font-size:13px}
+  .big{font-size:26px;font-weight:700}
+  .muted{color:#888;font-size:12px}
+  .item{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #ddd;padding:9px 2px;font-size:13px}
+  .flag{border:1px solid #999;border-radius:3px;padding:0 4px;font-size:10px;margin-left:4px}
+  .btn{border:1.5px solid #333;border-radius:8px;text-align:center;padding:12px;font-weight:600;font-size:14px}
+  .sm{border:1px solid #888;border-radius:4px;padding:2px 6px;font-size:11px}
+  .nav{position:absolute;bottom:0;left:0;right:0;display:flex;border-top:1px solid #aaa}
+  .nav div{flex:1;text-align:center;padding:10px 0;font-size:11px;color:#999}
+  .nav .on{color:#222;font-weight:700}
+  .keys{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin:8px 0}
+  .keys div{border:1px solid #aaa;border-radius:6px;text-align:center;padding:10px 0;font-size:16px}
+  .two{display:flex;gap:8px}
+  .two .btn{flex:1;font-size:13px}
+  table{width:100%;font-size:11px;border-collapse:collapse}
+  td{padding:3px 0;border-bottom:1px dotted #ccc}
+  td:last-child{text-align:right}
+</style></head><body>
+<h1>DrukStock Core: rough wireframe (3 states)</h1>
+<p class="note">Credit is the home module. Sales / Stock / Reports exist as tabs but are greyed until built. GST invoice appears only for GST-registered shops.</p>
+<div class="row">
+
+<!-- STATE 1: Credit home. First thing the owner sees = total money owed to them. Sorted by biggest + oldest debt, because that's the money they're losing. -->
+<div class="col"><div class="label">1. Credit home</div>
+<div class="phone">
+  <div class="muted">Tashi General Store · Thimphu</div>
+  <div class="muted" style="margin-top:8px">Customers owe you</div>
+  <div class="big">Nu 48,350</div>
+  <div class="muted" style="margin-bottom:10px">23 customers · 6 older than 30 days</div>
+  <div class="box">Search name or phone…</div>
+  <div class="item"><div>Karma Dorji<span class="flag">42 days</span><div class="muted">17xxxx21</div></div><div><b>Nu 6,240</b> <span class="sm">Remind</span></div></div>
+  <div class="item"><div>Pema Choden<span class="flag">35 days</span><div class="muted">77xxxx08</div></div><div><b>Nu 4,180</b> <span class="sm">Remind</span></div></div>
+  <div class="item"><div>Sonam Wangchuk<div class="muted">17xxxx55</div></div><div><b>Nu 2,900</b> <span class="sm">Remind</span></div></div>
+  <div class="item"><div>Dechen Wangmo<div class="muted">77xxxx91</div></div><div><b>Nu 1,315</b> <span class="sm">Remind</span></div></div>
+  <!-- Long names (e.g. "Tshering Yangchen Dorji Lhamo") truncate with ellipsis; amount never truncates. -->
+  <div class="btn" style="margin-top:12px">+ New credit entry</div>
+  <div class="nav"><div class="on">Credit</div><div>Sales</div><div>Stock</div><div>Reports</div></div>
+</div></div>
+
+<!-- STATE 2: Customer detail. Goal: record a credit in < 5 seconds, faster than the ledger. Keypad is always visible; two verbs only. -->
+<div class="col"><div class="label">2. Customer: record credit / payment</div>
+<div class="phone">
+  <div class="muted">← Back</div>
+  <div style="font-weight:700;font-size:16px;margin-top:6px">Karma Dorji</div>
+  <div class="muted">Owes</div><div class="big">Nu 6,240</div>
+  <div class="box" style="text-align:right;font-size:22px;margin-top:8px">Nu 340</div>
+  <div class="keys"><div>1</div><div>2</div><div>3</div><div>4</div><div>5</div><div>6</div><div>7</div><div>8</div><div>9</div><div>00</div><div>0</div><div>⌫</div></div>
+  <div class="two"><div class="btn">Gave credit</div><div class="btn">Got payment</div></div>
+  <div class="muted" style="margin-top:10px">History</div>
+  <table><tr><td>21 Oct · credit</td><td>+340</td></tr><tr><td>14 Oct · payment (mBoB)</td><td>−2,000</td></tr><tr><td>11 Sep · credit</td><td>+1,150</td></tr></table>
+  <div class="sm" style="display:inline-block;margin-top:8px">WhatsApp reminder</div>
+  <!-- Reminder opens WhatsApp prefilled: "Kuzuzangpo Karma, you owe Tashi General Store Nu 6,240. Pay via mBoB to acct xxxx. Thank you." -->
+  <div class="nav"><div class="on">Credit</div><div>Sales</div><div>Stock</div><div>Reports</div></div>
+</div></div>
+
+<!-- STATE 3: GST invoice (Phase 2, only if interviews confirm a registered shop wants it). Shows price before/after GST and exempt lines. -->
+<div class="col"><div class="label">3. GST invoice (Phase 2, gated)</div>
+<div class="phone">
+  <div style="font-weight:700">Tax Invoice</div>
+  <div class="muted">Druk Hardware · TPN xxxxx · Inv #0142 · 23 Oct 2026</div>
+  <div class="muted" style="margin:6px 0">To: Contractor Ugyen · TPN xxxxx</div>
+  <table>
+    <tr><td><b>Item</b></td><td><b>Amount</b></td></tr>
+    <tr><td>Cement 50kg ×20</td><td>9,000.00</td></tr>
+    <tr><td>TMT bar 12mm ×10</td><td>8,600.00</td></tr>
+    <tr><td>Rice 25kg ×1 <span class="flag">exempt</span></td><td>1,450.00</td></tr>
+    <tr><td>Taxable value</td><td>17,600.00</td></tr>
+    <tr><td>GST 5%</td><td>880.00</td></tr>
+    <tr><td>Exempt</td><td>1,450.00</td></tr>
+    <tr><td><b>Total (rounded)</b></td><td><b>Nu 19,930</b></td></tr>
+  </table>
+  <div class="two" style="margin-top:12px"><div class="btn">Paid now</div><div class="btn">Add to credit</div></div>
+  <!-- "Add to credit" links Phase 2 back to the Credit module: invoice lands on the customer's baki balance. -->
+  <div class="sm" style="display:inline-block;margin-top:8px">Share PDF on WhatsApp</div>
+  <div class="nav"><div>Credit</div><div class="on">Sales</div><div>Stock</div><div>Reports</div></div>
+</div></div>
+
+</div></body></html>
