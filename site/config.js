@@ -3,3 +3,4 @@
 // deploy if a production bundle contains `TEST_STANDALONE = true`.
 export const TEST_STANDALONE = false;
 export const BUILD = 'dev';
+export const CACHE = 'drukstock-dev';

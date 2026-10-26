@@ -6,7 +6,7 @@ import { createLog, decide } from './log.js';
 import { LABELS, fill } from './labels.js';
 import { createStore, requestPersistence } from './store.js';
 import { createNav } from './nav.js';
-import { TEST_STANDALONE, BUILD } from './config.js';
+import { TEST_STANDALONE, BUILD, CACHE } from './config.js';
 
 const CONTACT_NUMBER = ''; // eng D25: the separate DrukStock WhatsApp number, set before interviews
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -104,7 +104,7 @@ app.addEventListener('pointerdown', () => {
 // ---------- screens ----------
 function startScreen() {
   const standalone = isStandalone();
-  const ready = standalone && (TEST_STANDALONE || !!navigator.serviceWorker?.controller);
+  const ready = standalone && offlineReady; // eng D24: only after the precache finished
   const next = log.nextVariant();
   let status;
   if (!standalone) status = h('p', { class: 'status notready', text: 'Open DrukStock from your home screen' });
@@ -307,6 +307,22 @@ function exportCsv() {
     markExported();
   }
 }
+
+// ---------- offline (eng D24) ----------
+let offlineReady = false;
+async function checkOffline() {
+  const was = offlineReady;
+  offlineReady = typeof caches !== 'undefined' && !!(await caches.has(CACHE) && await (await caches.open(CACHE)).match('./__precache-complete__'));
+  if (offlineReady !== was && nav.screen === 'start') render();
+}
+if ('serviceWorker' in navigator && BUILD !== 'dev') {
+  navigator.serviceWorker.register('sw.js').then(reg => {
+    reg.addEventListener('updatefound', () => reg.installing?.addEventListener('statechange', checkOffline));
+  });
+  navigator.serviceWorker.addEventListener('controllerchange', checkOffline);
+  setInterval(checkOffline, 2000);
+}
+await checkOffline();
 
 // ---------- boot ----------
 show(resumed ? 'list' : 'start');
