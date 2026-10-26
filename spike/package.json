@@ -1,0 +1,14 @@
+{
+  "name": "drukstock-3d-spike",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "esbuild scene.js --bundle --minify --format=esm --outfile=dist/scene.js"
+  },
+  "dependencies": {
+    "three": "^0.170.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.2"
+  }
+}
