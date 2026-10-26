@@ -1,0 +1,85 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>DrukStock demo page wireframe</title>
+<style>
+  body{font-family:-apple-system,system-ui,sans-serif;background:#fff;color:#222;margin:24px}
+  h1{font-size:16px;font-weight:600;margin:0 0 4px}
+  .note{font-size:12px;color:#777;margin:0 0 20px;max-width:1200px}
+  .row{display:flex;gap:24px;align-items:flex-start}
+  .col{width:250px}
+  .label{font-size:12px;color:#777;margin-bottom:6px}
+  .phone{width:250px;height:520px;border:1.5px solid #555;border-radius:26px;padding:14px 12px;box-sizing:border-box;position:relative;overflow:hidden}
+  .box{border:1px dashed #999;border-radius:6px;padding:8px;margin-bottom:8px;font-size:12px}
+  .scene{height:250px;border:1px dashed #999;border-radius:8px;display:flex;align-items:center;justify-content:center;text-align:center;font-size:12px;color:#666;margin:8px 0}
+  .big{font-size:22px;font-weight:700}
+  .muted{color:#888;font-size:11px}
+  .item{display:flex;justify-content:space-between;border-bottom:1px solid #ddd;padding:6px 2px;font-size:12px}
+  .flag{border:1px solid #999;border-radius:3px;padding:0 3px;font-size:9px;margin-left:3px}
+  .btn{border:1.5px solid #333;border-radius:8px;text-align:center;padding:10px;font-weight:600;font-size:13px;margin-top:6px}
+  .sm{border:1px solid #888;border-radius:4px;padding:2px 5px;font-size:10px;display:inline-block}
+  .keys{display:grid;grid-template-columns:repeat(3,1fr);gap:4px;margin:6px 0}
+  .keys div{border:1px solid #aaa;border-radius:5px;text-align:center;padding:7px 0;font-size:14px}
+  .two{display:flex;gap:6px}.two .btn{flex:1;font-size:11px}
+  .ruled{background:repeating-linear-gradient(#fff 0 21px,#ccd 21px 22px);border:1px solid #bbb;border-radius:4px;padding:4px 8px}
+  .ruled .item{border:none;padding:3px 0;font-family:"Bradley Hand","Segoe Print",cursive}
+  .qr{width:110px;height:110px;border:1px solid #333;margin:10px auto;display:flex;align-items:center;justify-content:center;font-size:11px}
+  .foot{position:absolute;bottom:10px;left:12px;right:12px;display:flex;justify-content:space-between}
+</style></head><body>
+<h1>DrukStock interview demo (Approach C): rough wireframe, 4 states</h1>
+<p class="note">The demo is the page. Opened on the founder's phone during interviews. Works offline after first load (service worker). Two variants share one demo engine: 3D counter scene (default) and flat notebook (?v=flat). Fake data only; nothing about the shopkeeper is stored.</p>
+<div class="row">
+
+<!-- STATE 1: Opening. One light 3D scene: a shop counter with a closed baki notebook. Only one instruction. If WebGL fails, a still image of the same scene shows, and the tap still works. -->
+<div class="col"><div class="label">1. Opening (3D variant)</div>
+<div class="phone">
+  <div class="muted">DrukStock · ཌྲུག་སྟོག</div>
+  <div class="scene">[ light 3D scene ]<br>shop counter, closed<br>red baki notebook,<br>slow parallax on tilt<br><br>(still image if no WebGL)</div>
+  <div style="font-size:15px;font-weight:600;text-align:center">Your baki book, on your phone.</div>
+  <div class="btn">Try it · ལག་ལེན</div>
+  <div class="muted" style="text-align:center;margin-top:6px">No signup. Sample customers only.</div>
+</div></div>
+
+<!-- STATE 2: The notebook opens (page-turn) into the demo. Six made-up customers with Bhutanese names. Recording a credit updates the balance and total with a short animation. "Skip 30 days" makes the overdue flag appear during the interview. -->
+<div class="col"><div class="label">2. Record a credit (3D variant)</div>
+<div class="phone">
+  <div class="muted">Customers owe you</div><div class="big">Nu 12,480</div>
+  <div class="item"><span>Karma Dorji<span class="flag">32 days</span></span><b>Nu 3,790</b></div>
+  <div class="item"><span>Pema Choden</span><b>Nu 2,150</b></div>
+  <div class="item"><span>Sonam Wangmo</span><b>Nu 1,320</b></div>
+  <div class="box" style="text-align:right;font-size:18px;margin-top:6px">Nu 450</div>
+  <div class="keys"><div>1</div><div>2</div><div>3</div><div>4</div><div>5</div><div>6</div><div>7</div><div>8</div><div>9</div><div>00</div><div>0</div><div>⌫</div></div>
+  <div class="two"><div class="btn">Gave credit</div><div class="btn">Got payment</div></div>
+  <div class="foot"><span class="sm">Skip 30 days</span><span class="sm">Reset</span></div>
+</div></div>
+
+<!-- STATE 3: Flat variant (?v=flat). Same engine and data, drawn as a ruled paper notebook with handwritten-style numbers and one ink color. No WebGL at all. Used in alternate interviews to compare against the 3D variant. -->
+<div class="col"><div class="label">3. Same demo, flat variant (?v=flat)</div>
+<div class="phone">
+  <div class="muted">Customers owe you</div><div class="big">Nu 12,480</div>
+  <div class="ruled">
+    <div class="item"><span>Karma Dorji ✱</span><span>3,790</span></div>
+    <div class="item"><span>Pema Choden</span><span>2,150</span></div>
+    <div class="item"><span>Sonam Wangmo</span><span>1,320</span></div>
+    <div class="item"><span>Tashi Lhamo</span><span>980</span></div>
+  </div>
+  <div class="box" style="text-align:right;font-size:18px;margin-top:8px">Nu 450</div>
+  <div class="two"><div class="btn">Gave credit</div><div class="btn">Got payment</div></div>
+  <div class="muted" style="margin-top:6px">✱ older than 30 days</div>
+  <div class="foot"><span class="sm">Skip 30 days</span><span class="sm">Reset</span></div>
+</div></div>
+
+<!-- STATE 4: End card. The WhatsApp link would open on the founder's own phone, so the shopkeeper scans a QR instead. A long-press on the logo opens the founder-only log (time to first credit, taps, gave up?), kept in this browser only. -->
+<div class="col"><div class="label">4. End card + founder log (hidden)</div>
+<div class="phone">
+  <div style="font-size:15px;font-weight:600;text-align:center;margin-top:20px">Want this for your shop?</div>
+  <div class="muted" style="text-align:center">Scan to message us on WhatsApp</div>
+  <div class="qr">[ QR → wa.me ]</div>
+  <div class="btn">Try again</div>
+  <div class="box" style="margin-top:22px">
+    <b>Founder log</b> (long-press logo)<br>
+    #7 · 3D · first credit 9.4 s · 11 taps · no help<br>
+    #8 · flat · first credit 6.1 s · 8 taps · no help<br>
+    <span class="sm">Export CSV</span> <span class="sm">Clear</span>
+  </div>
+</div></div>
+
+</div></body></html>

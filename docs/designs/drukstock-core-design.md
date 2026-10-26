@@ -71,20 +71,25 @@ To keep premise #1 honest, the build is **sequenced against evidence**:
 
 *Data model:*
 - Shop (name, TPN optional, mBoB/payment details, reminder message template, default country code +975) → users (owner, staff) → customers → ledger entries (credit / payment / reversal, amount in Nu, recorded_at, note, recorded_by, device_id).
+- **Money (eng review D12):** amounts are `numeric(12,2)` Nu in Postgres. All client arithmetic uses a decimal library, never plain JS numbers. Required test: sums stay exact over many entries.
 - Customer phone numbers are stored in E.164 format (+975 plus 8 digits) so a reminder opens `wa.me/975XXXXXXXX`. Phone is optional; reminders are disabled for customers without one.
 - Balances are derived from entries, never stored as a mutable total, so the books stay auditable.
+- **Local balance cache (eng review D16):** the phone keeps each customer's balance, oldest-unpaid date and advance in a disposable cache, updated on each local entry and rebuilt for affected customers after each pull page or merge. It is never synced and never the source of truth. Required test: the cache equals a full recompute after randomized appends, pulls and merges.
 
-*Sync model (offline-first):*
-- Every record (entry, customer) gets a client-generated UUID. Uploads are idempotent upserts keyed on that UUID, so a retry never duplicates an entry.
+*Sync model (offline-first, hand-written per eng review D3: IndexedDB outbox, idempotent upsert-by-client-UUID endpoint on Supabase Postgres + RLS, retry with backoff, pull of changes since a cursor; no third-party sync engine):*
+- Every record (entry, customer) gets a client-generated UUID, so a retry never duplicates anything. **Ledger entries are insert-only (eng review D11):** `INSERT ... ON CONFLICT (id) DO NOTHING`; if a stored entry differs from an upload with the same id, that row is rejected and shown to the owner as a sync conflict. Customers and settings use last-write-wins upsert.
+- **Pull cursor (eng review D6):** every syncable table has `change_seq bigint`, set by a trigger to `shops.last_seq + 1` under that shop's row lock on insert and update. A phone pulls rows where `shop_id` is its shop and `change_seq > cursor`, in `change_seq` order, then stores the highest value as its new cursor. Index: `(shop_id, change_seq)` on every syncable table (required implementation of D6). **Paging (eng review D15):** each pull returns at most 500 rows; the phone applies a page, saves the cursor, and asks again until a page has fewer than 500 rows, so an interrupted first sync resumes where it stopped.
 - Balances are sums, so the order entries arrive in doesn't change the result. History shows the device's `recorded_at`; the server also stores `received_at`, which is used for ordering when device clocks disagree.
-- The app requests persistent browser storage (`navigator.storage.persist()`). An "N entries not backed up" badge shows any unsynced entries, and the app warns when anything has been unsynced for more than 24 hours. A lost phone loses only unsynced entries.
+- The app requests persistent browser storage (`navigator.storage.persist()`) on the owner's first credit/payment tap and checks `persisted()`. If storage is not persistent, a banner reads "This phone may clear entries that aren't backed up. Connect to back up." whenever unsynced entries exist (eng review D5). An "N entries not backed up" badge shows any unsynced entries, and the app warns when anything has been unsynced for more than 24 hours. Unsynced entries can be lost with the phone or to browser storage eviction; the server is the only durable copy.
 
 *Customers and conflicts:*
 - Creating a customer with a phone number that already exists in the shop shows "Karma Dorji already has this number. Use them?" instead of creating a duplicate.
-- The owner can merge two customers, which moves all entries to one of them. Concurrent edits to a name or phone are resolved last-write-wins by `received_at`.
+- The owner can merge two customers (kept in Phase 1, eng review D2). Merging sets `merged_into` on the source customer and archives it; **entries are never updated** (eng review D7). Balance, aging, history and reminders count a customer together with every customer merged into it, and recording against a merged customer goes to its target. Balances and debt aging must be identical before and after a merge. Concurrent edits to a name or phone (the owner on two phones) are resolved last-write-wins by `received_at`.
 - A customer with a non-zero balance can't be deleted, only archived.
 
 *Debt aging and sorting:*
+- **Advances (eng review D13):** a payment larger than the balance is allowed; a negative balance shows as "Advance Nu X" and is applied FIFO to later credits. Debt age counts only unpaid credits.
+- **Reversal rules (eng review D13):** only an original credit or payment can be reversed, and only once (unique `reverses_id`); a reversal can't itself be reversed. To undo a mistaken reversal, re-record the entry.
 - Payments are allocated FIFO against the oldest unpaid credits. A customer's debt age is the number of days since their oldest still-unpaid credit, and it's flagged once it passes 30 days.
 - Credit home sorts by amount owed (largest first) by default, with an "Oldest first" toggle.
 
@@ -92,22 +97,22 @@ To keep premise #1 honest, the build is **sequenced against evidence**:
 - Tapping an entry in the history and choosing "Correct" creates a reversal entry, and optionally the right entry in its place, in one step. A reason is optional.
 - The history shows the original entry struck through, linked to its reversal. Nothing is ever deleted.
 
-*Roles (owner / staff):*
-- Both can add customers, record credit and payments, see a customer's balance, and send reminders.
-- Owner only: shop total, CSV export, shop settings, inviting and removing staff, merging and archiving customers, and correcting anyone's entry. Staff can correct only their own entries, within 24 hours.
-- Removing a staff member signs out their devices on the next sync. Entries they recorded offline before removal are still accepted and flagged for the owner to review.
+*Roles:* **Phase 1 has one owner account (eng review D1).** The owner may use more than one phone, but there are no staff users. The schema keeps `recorded_by` and `device_id` so staff can be added without a rewrite.
+- *Deferred to Phase 1.5:* staff invites and removal, the owner/staff permission matrix (staff can add customers, record, see balances, send reminders; owner-only shop total, export, settings, staff, merge/archive, and correcting anyone's entry; staff correct only their own entries within 24 hours), and removed-staff entries flagged for review.
 
 *Login:*
 - The owner signs up with a phone number and a one-time SMS code, needed once per device. After that, a 4-digit PIN unlocks the app, and the session keeps working offline indefinitely.
-- The owner can sign out any device from settings; it takes effect on that device's next sync. Staff join via an invite code from the owner, then set their own PIN.
-- WhatsApp OTP is the fallback if SMS costs or delivery prove bad (evaluate in /plan-eng-review).
+- **PIN limits (eng review D9):** after 5 wrong PINs the app locks for 30 s, doubling with each further miss; after 10 wrong PINs, unlocking needs a fresh one-time code while online. Local data is never wiped. The PIN stops casual use at the counter; it does not encrypt local data, and remote sign-out reaches a phone only when it next syncs.
+- The owner can sign out any device from settings; it takes effect on that device's next sync. Staff invites are Phase 1.5 (eng review D1).
+- **Before any auth code (Phase 0, eng review D4):** send Twilio Verify OTPs to 3 real Bhutanese numbers across B-Mobile and TashiCell and record delivery rate and seconds to arrive. If fewer than 3/3 arrive within 60 s, WhatsApp OTP becomes the primary login.
 
 *Tenant isolation and data protection:*
 - Every row carries `shop_id`, and isolation is enforced server-side (row-level security), never only in the client. No query can cross shops.
+- **Write path (eng review D8):** sync writes go through `sync_push(jsonb)`, a SECURITY INVOKER Postgres function called with the owner's own JWT, so RLS policies (`shop_id = auth_shop_id()`) apply to every insert, update and read. The service-role key is never used by app or sync code. Required test: shop A's token cannot insert, update or read shop B rows, including by reusing one of shop B's UUIDs.
 - Customer names, phone numbers and debts are visible only to that shop's users. Support access by the DrukStock team requires the owner's consent and is logged.
 - The owner can export all shop data and delete the shop. A customer's deletion request goes through the shop owner.
 
-*Screens:* Credit home (total owed, sort toggle, search by name or phone), Customer detail (keypad + "Gave credit" / "Got payment", history with corrections), WhatsApp reminder deep link prefilled from the shop's template (amount, shop name, mBoB details), Shop settings, Staff management, CSV export.
+*Screens:* Credit home (total owed, sort toggle, search by name or phone), Customer detail (keypad + "Gave credit" / "Got payment", history with corrections), WhatsApp reminder deep link prefilled from the shop's template (amount, shop name, mBoB details), Shop settings, CSV export. (Staff management is Phase 1.5.)
 - Sales, Stock and Reports tabs are visible but disabled.
 
 **Phase 2: GST invoices. Gate: the hardware test in the Phase 0 decision rule.**
@@ -139,8 +144,8 @@ To keep premise #1 honest, the build is **sequenced against evidence**:
 
 ## Distribution Plan
 - Delivered as a web service: an installable PWA ("Add to Home Screen") at a single URL, so there's no app store review and it works on Android and on computers.
-- Hosting: a managed Postgres + auth backend and a static frontend host; to be chosen in /plan-eng-review.
-- CI/CD: none exists. Initialize git and a GitHub repo, then auto-deploy on merge to main with a preview deploy per PR.
+- Hosting (eng review D10): Supabase (Postgres, RLS, phone auth) in Mumbai (ap-south-1); the PWA's static files on Cloudflare Pages with a preview per PR.
+- CI/CD (eng review D10): GitHub Actions. On every PR: unit tests, local Supabase with all migrations applied, and the RLS isolation tests. On merge to main: apply migrations, then deploy the frontend. Verify Supabase CLI commands against `supabase --help` before writing the workflow.
 - Getting users: walk into shops in Thimphu and install it on the owner's phone in person. There's no marketing channel until 10 shops use it.
 
 ## Dependencies
@@ -355,3 +360,602 @@ Findings below are retained from the last completed review; the current document
 
 > Mark device ownership as a hypothesis and add it to the interview checklist.
 <!-- gstack:office-hours:concerns:end -->
+
+## Eng Review (/plan-eng-review, 2026-10-23)
+
+Target: `docs/designs/drukstock-core-design.md` (DrukStock Core, Approach B), fixed. Report file: this document. Repo: tshewangyeshi/DrukStock @ baf75cd. No code exists yet; every path below is proposed.
+
+### Scope Challenge A: assessment
+
+**What already solves each sub-problem (search check, Layer 1/2):**
+- Offline-first sync to Postgres: off-the-shelf sync engines exist. PowerSync syncs Postgres to client-side SQLite, queues and retries offline writes, and leaves write security to Postgres RLS; its sync rules govern downloads only ([PowerSync + Supabase RLS](https://docs.powersync.com/integrations/supabase/rls-and-sync-streams.md), [comparison](https://www.pistack.xyz/posts/2026-10-21-local-first-sync-engines-electricsql-powersync-triplit/)). ElectricSQL leaves offline writes to app code ([PowerSync vs Electric](https://powersync.com/blog/electricsql-electric-next-vs-powersync), vendor-authored). [Layer 2]
+- Tenant isolation: Postgres row-level security, as the plan already says. Note: from 30 May 2026, new Supabase projects don't expose `public` tables to the Data API by default. [Layer 1]
+- Phone OTP: Supabase phone auth with Twilio Verify, MessageBird, Vonage or TextLocal. Defaults: 60 s resend, 1 h expiry ([Supabase phone login](https://supabase.com/docs/guides/auth/phone-login), [Twilio](https://supabase.com/docs/guides/auth/phone-login/twilio)). **No source confirms SMS delivery to +975.** [Layer 1, unverified for Bhutan]
+- Persistent storage: `navigator.storage.persist()` asks the browser and may be denied; call it from a user gesture and check `persisted()`. A server or export backup is still needed ([Chrome storage buckets](https://developer.chrome.com/docs/web-platform/storage-buckets), [web.dev offline data](https://web.dev/learn/pwa/offline-data)). [Layer 1]
+- WhatsApp reminder: a `wa.me/<E.164 without +>?text=` click-to-chat link. No API, no cost. [Layer 1]
+
+**Minimum change for the goal:** Phase 0 needs only the schema, RLS, auth and a sync path that one owner device can trust. Customer merge, staff roles and multi-device conflict handling serve shops that don't exist yet.
+
+**Complexity check [estimated, proposed files]:** schema/migrations 1, RLS policies 1, auth (OTP + PIN lock) 2, local store + sync client 2, server write path 1, debt-aging function 1, reminder-link builder 1, screens 5 (Credit home, Customer detail, Shop settings, Staff management, CSV export), customer merge 1. That's ≈15 files and 3 new services (sync engine, SMS/OTP provider, auth/PIN lock). **The complexity gate trips (8+ files, 2+ services).**
+
+**TODOS cross-reference:** no TODOS.md exists.
+
+**Distribution:** the PWA is a web service. CI/CD is undefined: the plan says "auto-deploy on merge"; the host is to be chosen here.
+
+**Reality rows:**
+
+| premise | claim | receipt | verdict |
+|---|---|---|---|
+| GST 5% live 1 Jan 2026 | doc:28 | Business Bhutan, Fonoa (office-hours search) | verified (web) |
+| Registration at Nu 5M | doc:28 | DRC FAQ; "at" vs "above" open | partly verified |
+| aBit POS ships GST receipts, iPad | doc:29 | App listing (office-hours search) | verified (web) |
+| SMS OTP reaches +975 numbers | doc:101 | none found | **unverified** |
+| PowerSync queues offline writes; RLS guards uploads | proposed | PowerSync docs (vendor) | verified (vendor doc) |
+| persist() keeps data | doc:80 | Chrome docs say it can be denied | **contradicted in part**: needs a fallback |
+| Shops use Android phones | doc:25 | none | **unverified** |
+| Grocers keep credit in paper ledgers | doc:16 | founder belief | **unverified** |
+
+REALITY: premise-table finding unverified=3 (SMS +975, Android, ledgers), 1 partly contradicted (persist) docs/designs/drukstock-core-design.md:80
+REALITY: already-done pass repo has one commit (baf75cd), docs only; nothing implemented docs/designs/drukstock-core-design.md:1
+REALITY: surface-check finding Supabase phone providers verified; no provider confirms +975 delivery docs/designs/drukstock-core-design.md:101
+REALITY: binding-decisions finding logged decision "Build DrukStock Core" says interviews run "in parallel with the foundation + credit module", but the approved doc allows foundation only, with no screens, during Phase 0; the doc is newer and narrower, so supersede the log entry docs/designs/drukstock-core-design.md:32
+REALITY: numbers pass every effort, price (Nu 300-500) and speed (5 s) figure is [estimated]; GST figures come from cited sources docs/designs/drukstock-core-design.md:50
+REALITY: deferred-asks pass no linked issue; the founder's original asks (inventory, purchases, expenses, receipts, low-stock alerts, period summaries) are explicitly deferred to Phase 3 docs/designs/drukstock-core-design.md:120
+REALITY: pr-count pass no ship-policy.json, so the default is one PR per wave; Phase 0 foundation = 1 PR docs/designs/drukstock-core-design.md:57
+
+### Scope Challenge B: scope record
+
+feature answers: D1 = A) Defer staff to 1.5 (staff invites/removal, role matrix and concurrent multi-staff sync leave Phase 1; Phase 1 is one owner account; schema keeps `recorded_by`/`device_id`); D2 = A) Keep merge in Phase 1 (owner-only merge moves all entries of one customer onto another, then archives the empty one; needs before/after balance and aging equality tests); structure: D3 = A) Original arrangement (Supabase Postgres + RLS + phone auth; hand-written IndexedDB outbox, idempotent upsert-by-client-UUID sync endpoint, retry/backoff, pull since cursor; no PowerSync); accepted scope: Phase 0 foundation (schema, RLS, auth, custom sync) + Phase 1 single-owner credit module with merge, aging, corrections, reminders, shop settings, CSV export; staff management screen and role matrix moved to Phase 1.5; pending remedies: none.
+Scope Challenge result: scope reduced per recommendation (staff deferred).
+
+## Decision ledger
+
+### R1: Verify SMS OTP delivery to +975 before building auth
+Finding: SC-1, P1, confidence 8/10, docs/designs/drukstock-core-design.md:101, reviewer: plan-eng-review (Scope Challenge)
+Plan baseline: "The owner signs up with a phone number and a one-time SMS code" with WhatsApp OTP as an unevaluated fallback (doc:101-103), approved in office-hours D6.
+Runtime evidence: unknown. Supabase supports Twilio/MessageBird/Vonage/TextLocal; no source confirms delivery or sender-ID rules for +975.
+Comparison grid:
+| Choice | Current | A | B |
+|---|---|---|---|
+| R1 SMS delivery proof | none, assumed | Phase 0 probe: send Twilio Verify OTP to 3 real Bhutanese numbers (B-Mobile + TashiCell), record delivery rate and seconds; auth build waits for result | no probe; build SMS auth and find out at pilot |
+| Fallback if probe fails | WhatsApp OTP "evaluate in eng review" | WhatsApp OTP becomes primary (decided now as the fail branch) | unchanged, unevaluated |
+Question D4:
+D4 — Prove SMS OTP reaches Bhutanese phones before building login?
+Project/branch/task: DrukStock Core on main, Phase 0 auth (doc line 101).
+ELI10: Every shop signs up by receiving a one-time code by SMS. We found no evidence that the usual SMS providers deliver to Bhutan (+975) numbers. If they don't, nobody can log in, and you'd learn that at your first pilot shop. A 1-hour test sending real codes to 3 Bhutanese phones settles it before any login code is written.
+Stakes if we pick wrong: skip the test and the pilot shop owner never receives a code, so the first impression is a broken app.
+Recommendation: A because a one-hour probe protects the only door into the app.
+Completeness: A=10/10, B=5/10
+Pros / cons:
+A) Probe in Phase 0 (recommended)
+  ✅ Real delivery rate and delay on B-Mobile and TashiCell before auth code exists
+  ✅ If SMS fails, WhatsApp OTP is already decided as primary, so no re-planning
+  ❌ Needs a Twilio trial account and 3 friends' phones (human: ~1 hr / CC: ~15 min)
+B) Skip the probe
+  ✅ Zero extra work now; most global providers cover most countries
+  ✅ Problems, if any, show up quickly at the first pilot
+  ❌ A failed delivery blocks every signup and is found in front of a shop owner
+Net: One hour of proof against a broken front door at the pilot.
+Header: SMS proof
+Options:
+A) Probe in Phase 0 (recommended)
+During Phase 0, send Twilio Verify OTPs to 3 real Bhutanese numbers across B-Mobile and TashiCell; record delivery rate and seconds to arrive. Auth build starts after. If fewer than 3/3 arrive within 60 s, WhatsApp OTP becomes the primary login. Effort human ~1 hr / CC ~15 min.
+B) Skip the probe
+Build SMS OTP auth as planned and learn delivery at the first pilot. WhatsApp OTP stays an unevaluated fallback. No extra work now; risk of a blocked signup in front of a shop owner.
+
+State: approved
+Actual answer: A) Probe in Phase 0 (recommended), user answer to D4
+Accepted scope: During Phase 0, send Twilio Verify OTPs to 3 real Bhutanese numbers across B-Mobile and TashiCell; record delivery rate and seconds to arrive. Auth build starts after. If fewer than 3/3 arrive within 60 s, WhatsApp OTP becomes the primary login.
+History: none
+
+### R2: Handle persistent-storage denial and eviction of unsynced entries
+Finding: SC-2, P2, confidence 8/10, docs/designs/drukstock-core-design.md:80, reviewer: plan-eng-review (Scope Challenge)
+Plan baseline: "The app requests persistent browser storage (`navigator.storage.persist()`)... A lost phone loses only unsynced entries" (doc:80), approved in office-hours D6.
+Runtime evidence: Chrome docs say persist() asks for permission and can be denied; IndexedDB can be evicted under storage pressure without user intervention (developer.chrome.com storage buckets). Grant heuristics on Android are unverified.
+Comparison grid:
+| Choice | Current | A | B |
+|---|---|---|---|
+| R2 persist() timing | unspecified (implied on load) | called on the owner's first "Gave credit"/"Got payment" tap (user gesture), result checked with `persisted()` | unchanged |
+| R2 denial handling | none | if not persisted: a persistent banner "This phone may clear entries that aren't backed up. Connect to back up." while the outbox is non-empty | none |
+| R2 doc claim (factual correction, not a choice) | "A lost phone loses only unsynced entries" | reworded in both options: unsynced entries can also be lost to browser eviction; the server is the only durable copy | same rewording |
+Question D5:
+D5 — Handle the browser refusing to keep unsynced entries safe?
+Project/branch/task: DrukStock Core on main, Phase 1 offline sync (doc line 80).
+ELI10: Entries typed while offline live only in the phone's browser storage until they upload. The plan asks the browser to keep that storage permanently, but Chrome can say no and can wipe it when the phone runs low on space. Today the plan assumes the request always works. The fix asks at the right moment (when the owner taps a button), checks the answer, and warns the owner while anything is not yet backed up.
+Stakes if we pick wrong: a shopkeeper with a full phone could silently lose a day of credit entries, which destroys trust in the app as a ledger.
+Recommendation: A because it's a few lines and turns silent loss into a visible warning.
+Completeness: A=9/10, B=4/10
+Pros / cons:
+A) Ask on tap, warn if denied (recommended)
+  ✅ Requests persistence from a user tap, where browsers are likelier to grant it
+  ✅ Owner sees a clear "not backed up" warning instead of a silent loss
+  ❌ One more banner state to design and test (human: ~1 day / CC: ~20 min)
+B) Keep the plan as written
+  ✅ No extra UI; the existing 24 h unsynced warning still exists
+  ✅ Most phones with free space won't evict a small database
+  ❌ A denied or evicted store goes unnoticed until entries are already gone
+Net: Twenty minutes of work against silent ledger loss on low-storage phones.
+Header: Storage loss
+Options:
+A) Ask on tap, warn if denied (recommended)
+Call navigator.storage.persist() on the owner's first credit/payment tap and check persisted(). If not persisted, show a banner "This phone may clear entries that aren't backed up. Connect to back up." whenever the outbox is non-empty. Effort human ~1 day / CC ~20 min. (doc:80 is reworded either way as a factual correction.)
+B) Keep the plan as written
+Leave persist() timing unspecified and add no denial handling. The 24 h unsynced warning remains the only signal. (doc:80 is reworded either way as a factual correction.)
+
+State: approved
+Actual answer: A) Ask on tap, warn if denied (recommended), user answer to D5
+Accepted scope: Call navigator.storage.persist() on the owner's first credit/payment tap and check persisted(). If not persisted, show a banner "This phone may clear entries that aren't backed up. Connect to back up." whenever the outbox is non-empty. doc:80 reworded as a factual correction.
+History: none
+
+### Section 1 (Architecture): spec-review fix re-verification (static read of current doc)
+
+| Round-1 finding | Fix present at | Verdict |
+|---|---|---|
+| R1-1 sequencing | doc:32, doc:57, The Assignment | resolved (one rule, used 3 places) |
+| R1-2 decision rule | doc:59-68 table | resolved |
+| R1-3 sync mechanics | doc:77-80 | partly: UUID, idempotency and persistence present; **pull cursor undefined (A1 below)** |
+| R1-4 customer conflicts | doc:83-85 | partly: **merge vs offline entries unresolved (A2 below)** |
+| R1-5 corrections flow | doc:91-93 | resolved |
+| R1-6 roles | doc:95 | resolved by D1 (single owner; matrix deferred) |
+| R1-7 login | doc:99-101 | resolved; SMS proof added by D4 |
+| R1-8 tenant isolation | doc:104-106 | partly: **write-path execution context unspecified (A3 below)** |
+| R1-9 debt aging | doc:87-89 | resolved |
+| R1-10 shop settings / E.164 | doc:73-74 | resolved |
+| R1-11 reminder metric | Success Criteria | resolved |
+| R1-12 invoice numbering | doc:113 | resolved |
+
+### R3: Define the pull cursor (A1)
+Finding: A1, P1, confidence 8/10, docs/designs/drukstock-core-design.md:77 ("pull of changes since a cursor") and :79 ("the server also stores `received_at`"), reviewer: plan-eng-review (Section 1)
+Plan baseline: "pull of changes since a cursor", cursor type unspecified (D3 accepted scope).
+Runtime evidence: none (no code). Known Postgres behavior: timestamps and sequence values are assigned before commit, so rows can become visible out of order; a `received_at > cursor` pull can skip a row committed late. Merges and customer edits are updates, so the pull must see updated rows too.
+Comparison grid:
+| Choice | Current | A | B |
+|---|---|---|---|
+| R3 pull cursor | undefined | per-shop `change_seq bigint` on every syncable row, set by a trigger that increments `shops.last_seq` under that shop's row lock on insert and update; pull = rows with `shop_id = me AND change_seq > cursor` | `received_at` timestamp cursor with a 5-minute overlap re-read and client-side dedupe by UUID |
+Question D6:
+D6 — How does a phone know which server changes it hasn't seen yet?
+Project/branch/task: DrukStock Core on main, Phase 0 hand-written sync (doc line 77).
+ELI10: Each phone asks the server "what changed since last time?" using a bookmark. The plan never says what the bookmark is. If it's a clock time, a change saved slowly can land with an earlier time than the bookmark and be skipped forever, so the phone shows a wrong balance. A per-shop counter that only goes up, assigned one at a time, can't skip anything.
+Stakes if we pick wrong: an owner's phone silently misses a payment or a merge and shows a customer owing money they already paid.
+Recommendation: A because a per-shop counter can't skip rows, and one shop writes slowly enough that the lock costs nothing.
+Completeness: A=10/10, B=7/10
+Pros / cons:
+A) Per-shop change counter (recommended)
+  ✅ Gap-free: every insert or update gets the next number for that shop, in commit order
+  ✅ Same cursor works for entries, customers, merges and settings
+  ❌ Serializes writes within one shop; a trigger plus tests (human: ~2 days / CC: ~30 min)
+B) Timestamp with overlap window
+  ✅ No trigger or lock; simplest server code
+  ✅ Overlap plus UUID dedupe catches most late commits
+  ❌ A commit later than the overlap window is still skipped, silently
+Net: A tiny per-shop lock against a rare but silent missed change.
+Header: Pull cursor
+Options:
+A) Per-shop change counter (recommended)
+Add change_seq bigint to every syncable table; a trigger sets it from shops.last_seq + 1 under a per-shop row lock on insert and update. Pull returns rows where shop_id = caller's shop and change_seq > cursor, ordered by change_seq. Test: concurrent writes produce no gaps or skips. Effort human ~2 days / CC ~30 min.
+B) Timestamp with overlap window
+Cursor = max received_at seen; each pull re-reads the last 5 minutes and the client dedupes by UUID. No trigger or lock. A commit delayed past 5 minutes is skipped silently.
+
+State: approved
+Actual answer: A) Per-shop change counter (recommended), user answer to D6
+Accepted scope: Add change_seq bigint to every syncable table; a trigger sets it from shops.last_seq + 1 under a per-shop row lock on insert and update. Pull returns rows where shop_id = caller's shop and change_seq > cursor, ordered by change_seq. Test: concurrent writes produce no gaps or skips.
+History: none
+
+### R4: Merge without rewriting entries (A2)
+Finding: A2, P1, confidence 8/10, docs/designs/drukstock-core-design.md:84 ("The owner can merge two customers, which moves all entries to one of them and archives the emptied customer") vs :93 ("Nothing is ever deleted") and :75 ("Balances are derived from entries"), reviewer: plan-eng-review (Section 1)
+Plan baseline: D2 approved keeping owner-only merge in Phase 1; mechanism "moves all entries" (D2 accepted scope).
+Runtime evidence: none (no code). Race by construction: the owner merges Karma(2) into Karma(1) on phone X; phone Y, offline, records a credit against Karma(2); when Y syncs, its upsert lands on the archived customer and the debt disappears from Credit home.
+Comparison grid:
+| Choice | Current | A | B |
+|---|---|---|---|
+| R4 merge mechanism | update customer_id on every entry of the source customer, archive source | set `customers.merged_into = target` on the source only; entries never change; balances, aging and history are computed over a customer plus everything merged into it; recording against a merged customer redirects to its target on both client and server | keep updating entries; additionally re-point entries that arrive later for an archived-by-merge customer during sync |
+| Merge feature (D2) | kept, owner-only | kept (unchanged) | kept (unchanged) |
+Question D7:
+D7 — Merge customers by linking them, not by rewriting their entries?
+Project/branch/task: DrukStock Core on main, Phase 1 customer merge (doc line 84), merge kept per D2.
+ELI10: Today the plan merges two customers by changing every old entry to point at the surviving customer. But a second phone that was offline can still record a new credit against the old customer, and after syncing that money lands on a hidden, archived customer, so it vanishes from the list. Linking instead ("Karma 2 is now part of Karma 1") leaves every entry untouched, and any entry for the old customer is simply counted under the survivor.
+Stakes if we pick wrong: a real debt silently disappears from the owner's list after a merge, which is exactly the money the app exists to recover.
+Recommendation: A because it keeps the ledger append-only and makes the offline race impossible instead of patched.
+Completeness: A=10/10, B=7/10
+Pros / cons:
+A) Link with merged_into (recommended)
+  ✅ No entry is ever modified, so history and audit stay exactly as recorded
+  ✅ Late offline entries for the old customer count under the survivor automatically
+  ❌ Balance and history queries must include merged customers (human: ~2 days / CC: ~40 min)
+B) Rewrite entries plus sync patch
+  ✅ Queries stay simple: one customer_id per entry
+  ✅ Matches the approved D2 wording literally
+  ❌ Mutates history, and every late-arriving entry needs a re-point step that can be missed
+Net: Slightly smarter queries against a ledger that never changes underneath you.
+Header: Merge method
+Options:
+A) Link with merged_into (recommended)
+Merge sets merged_into = target on the source customer and archives it; entries are never updated. Balance, aging, history and reminders aggregate a customer with all customers merged into it (chains resolved). Recording against a merged customer redirects to the target on client and server. Tests: balance and aging identical before/after merge; offline entry for the source after merge appears under the target. Effort human ~2 days / CC ~40 min.
+B) Rewrite entries plus sync patch
+Merge updates customer_id on all source entries and archives the source. The sync endpoint re-points any later-arriving entry whose customer is archived-by-merge. Tests: balance/aging equality, late-entry re-point. Entries are mutated.
+
+State: approved
+Actual answer: A) Link with merged_into (recommended), user answer to D7
+Accepted scope: Merge sets merged_into = target on the source customer and archives it; entries are never updated. Balance, aging, history and reminders aggregate a customer with all customers merged into it (chains resolved). Recording against a merged customer redirects to the target on client and server. Tests: balance and aging identical before/after merge; offline entry for the source after merge appears under the target.
+History: D2 accepted scope said "moves all entries"; the merge feature is unchanged, the mechanism is replaced by D7.
+
+### R5: Run the sync write path as the caller so RLS applies (A3)
+Finding: A3, P1, confidence 7/10, docs/designs/drukstock-core-design.md:77 ("idempotent upsert-by-client-UUID endpoint on Supabase Postgres + RLS") and :104-106 ("isolation is enforced server-side (row-level security), never only in the client"), reviewer: plan-eng-review (Section 1)
+Plan baseline: RLS enforces isolation (office-hours D6); the endpoint's execution identity is unspecified (D3 accepted scope).
+Runtime evidence: none (no code). Supabase's service-role key bypasses RLS; a server function using it would make RLS decorative. A client-chosen UUID could collide with another shop's row id.
+Comparison grid:
+| Choice | Current | A | B |
+|---|---|---|---|
+| R5 write-path identity | unspecified | Postgres function `sync_push(jsonb)` declared SECURITY INVOKER, called through the Data API with the owner's own JWT; RLS INSERT/UPDATE policies with `WITH CHECK (shop_id = auth_shop_id())`; the service-role key is never used by app or sync code | Edge Function holding the service-role key, checking `shop_id` in TypeScript before writing |
+| R5 isolation tests | none | test: shop A's token cannot insert, update or read shop B rows, including by reusing a shop B UUID | same tests against the Edge Function |
+Question D8:
+D8 — Make the sync endpoint run with the shop owner's own permissions?
+Project/branch/task: DrukStock Core on main, Phase 0 sync write path and tenant isolation (doc lines 77, 104).
+ELI10: The plan relies on the database's row-level security to keep each shop's data private. But on Supabase, server code that uses the master "service" key skips those rules entirely. If the sync endpoint is written that way, one bug in our code could let one shop write into or read another shop's books. Running the endpoint as the logged-in owner means the database itself refuses anything outside their shop, even if our code has a bug.
+Stakes if we pick wrong: a coding mistake exposes or corrupts other shops' customer names, phone numbers and debts.
+Recommendation: A because the database, not our code, should be the last line of defense for customers' debt records.
+Completeness: A=10/10, B=6/10
+Pros / cons:
+A) Caller identity + RLS (recommended)
+  ✅ Isolation holds even if sync code has a bug; the database rejects cross-shop rows
+  ✅ No master key anywhere in the app or sync path, so nothing to leak
+  ❌ Policies and a SECURITY INVOKER function to write and test (human: ~3 days / CC: ~45 min)
+B) Service key + code checks
+  ✅ Familiar app-server style; checks live in TypeScript
+  ✅ Easier to log and debug in one place
+  ❌ RLS is bypassed, so one missed check leaks or corrupts another shop's data
+Net: Let the database enforce privacy, or trust every line of sync code to do it.
+Header: Write identity
+Options:
+A) Caller identity + RLS (recommended)
+sync_push(jsonb) is a SECURITY INVOKER Postgres function called via the Data API with the owner's JWT; RLS INSERT/UPDATE/SELECT policies require shop_id = auth_shop_id(). The service-role key is never used by app or sync code. Tests: shop A's token cannot insert, update or read shop B rows, including by reusing a shop B UUID. Effort human ~3 days / CC ~45 min.
+B) Service key + code checks
+An Edge Function holds the service-role key and checks shop_id in TypeScript before writing. Same isolation tests run against the function. RLS still exists but the sync path bypasses it.
+
+State: approved
+Actual answer: A) Caller identity + RLS (recommended), user answer to D8
+Accepted scope: sync_push(jsonb) is a SECURITY INVOKER Postgres function called via the Data API with the owner's JWT; RLS INSERT/UPDATE/SELECT policies require shop_id = auth_shop_id(). The service-role key is never used by app or sync code. Tests: shop A's token cannot insert, update or read shop B rows, including by reusing a shop B UUID.
+History: none
+
+### R6: Limit PIN guessing (A5)
+Finding: A5, P2, confidence 6/10 (medium confidence, verify this is actually an issue), docs/designs/drukstock-core-design.md:99 ("After that, a 4-digit PIN unlocks the app, and the session keeps working offline indefinitely"), reviewer: plan-eng-review (Section 1)
+Plan baseline: 4-digit PIN, offline session indefinitely, remote sign-out on next sync (office-hours D6).
+Runtime evidence: none (no code). A 4-digit PIN has 10,000 values; with no attempt limit, anyone holding the phone can try them all. Local IndexedDB is not encrypted, so the PIN is a counter lock, not data protection; remote sign-out cannot reach a phone kept offline.
+Comparison grid:
+| Choice | Current | A | B |
+|---|---|---|---|
+| R6 PIN attempt limit | none | after 5 wrong PINs, lockout 30 s, doubling per further miss; after 10 wrong PINs, unlocking needs a fresh OTP online (local data is kept, not wiped) | none |
+| Threat-model statement (factual correction, not a choice) | absent | doc states the PIN stops casual use at the counter, does not encrypt local data, and remote sign-out applies on next sync | same statement |
+Question D9:
+D9 — Limit how many wrong PINs someone can try?
+Project/branch/task: DrukStock Core on main, Phase 1 app lock (doc line 99).
+ELI10: After the first login, a 4-digit PIN opens the app. Nothing stops someone who picks up the shop phone from trying PINs until one works, and then they can see every customer's debts. A small delay after 5 wrong tries, and a fresh one-time code after 10, makes guessing impractical without ever deleting the owner's data.
+Stakes if we pick wrong: a curious helper or a thief opens the credit book and sees or alters who owes what.
+Recommendation: A because it's a small amount of code and the data is customers' private debts.
+Completeness: A=9/10, B=5/10
+Pros / cons:
+A) Lockout after 5, OTP after 10 (recommended)
+  ✅ Guessing 10,000 PINs becomes impractical at a busy counter
+  ✅ Never wipes data; the owner recovers with a code sent to their phone
+  ❌ An owner who forgets the PIN while offline is locked out until online (human: ~1 day / CC: ~20 min)
+B) No attempt limit
+  ✅ The owner can never lock themselves out offline
+  ✅ No extra lockout states to build or test
+  ❌ Anyone holding the phone can eventually open every customer's debt record
+Net: Twenty minutes of code against an open credit book for anyone patient.
+Header: PIN limit
+Options:
+A) Lockout after 5, OTP after 10 (recommended)
+After 5 wrong PINs, lock for 30 s, doubling per further miss; after 10 wrong PINs, unlocking requires a fresh OTP while online. Local data is kept, never wiped. Tests: lockout timing, OTP requirement after 10, data intact after recovery. Effort human ~1 day / CC ~20 min. (The threat-model statement is added either way.)
+B) No attempt limit
+Unlimited PIN attempts, no lockout states. (The threat-model statement is added either way.)
+
+State: approved
+Actual answer: A) Lockout after 5, OTP after 10 (recommended), user answer to D9
+Accepted scope: After 5 wrong PINs, lock for 30 s, doubling per further miss; after 10 wrong PINs, unlocking requires a fresh OTP while online. Local data is kept, never wiped. Tests: lockout timing, OTP requirement after 10, data intact after recovery. Threat-model statement added as a factual correction.
+History: none
+
+### R7: Choose frontend host, region and CI/CD (A6)
+Finding: A6, P2, confidence 8/10, docs/designs/drukstock-core-design.md:142-143 ("Hosting: a managed Postgres + auth backend and a static frontend host; to be chosen in /plan-eng-review." / "CI/CD: none exists... auto-deploy on merge to main with a preview deploy per PR"), reviewer: plan-eng-review (Section 1)
+Plan baseline: backend = Supabase Postgres + RLS + phone auth (D3 accepted scope); frontend host, region and CI unspecified.
+Runtime evidence: none (no code, no workflows in repo; `git ls-files` shows docs only). Supabase CLI commands `supabase start` / `supabase db push` / `supabase test db` are from in-distribution knowledge, [verify against `supabase --help` before writing CI].
+Comparison grid:
+| Choice | Current | A | B |
+|---|---|---|---|
+| R7 frontend host | unspecified | Cloudflare Pages (static PWA, preview per PR) | Vercel (static PWA, preview per PR) |
+| R7 Supabase region | unspecified | Mumbai (ap-south-1), nearest to Bhutan | Mumbai (ap-south-1) |
+| R7 CI | none | GitHub Actions: on PR run unit tests + local Supabase with migrations + RLS isolation tests; on merge to main apply migrations, then deploy frontend | same GitHub Actions pipeline |
+Question D10:
+D10 — Where does the app live, and how does it ship?
+Project/branch/task: DrukStock Core on main; distribution plan (doc lines 142-143) left hosting for this review.
+ELI10: The database and login are decided (Supabase). Still open: which company serves the app's web files, which data center holds the data, and the automatic checks that run before anything ships. Both options use the Mumbai data center (closest to Bhutan, so faster at the counter) and the same GitHub checks, including the test that one shop can't see another's data. They differ only in who serves the web files.
+Stakes if we pick wrong: little; both hosts are easy to swap later. Skipping the CI part would let a broken privacy rule ship unnoticed.
+Recommendation: A because Cloudflare's free tier has no bandwidth cap for a static app and its network is close to South Asia; a taste call between two good hosts.
+Note: options differ in kind, not coverage — no completeness score.
+Pros / cons:
+A) Cloudflare Pages + Mumbai (recommended)
+  ✅ Free static hosting with preview links for every pull request
+  ✅ Same CI pipeline: migrations and RLS isolation tests gate every deploy
+  ❌ One more account (Cloudflare) beside Supabase and GitHub (human: ~1 day / CC: ~30 min)
+B) Vercel + Mumbai
+  ✅ Polished previews and very easy GitHub setup
+  ✅ Same CI pipeline: migrations and RLS isolation tests gate every deploy
+  ❌ Free-tier limits and pricing are stricter if the app grows (human: ~1 day / CC: ~30 min)
+Net: Two good static hosts; the CI gate is the part that matters.
+Header: Hosting
+Options:
+A) Cloudflare Pages + Mumbai (recommended)
+Frontend on Cloudflare Pages with a preview per PR; Supabase project in Mumbai (ap-south-1). GitHub Actions: on PR run unit tests, start local Supabase, apply migrations, run RLS isolation tests; on merge to main apply migrations, then deploy frontend. CLI commands verified against `supabase --help` before writing. Effort human ~1 day / CC ~30 min.
+B) Vercel + Mumbai
+Frontend on Vercel with a preview per PR; Supabase project in Mumbai (ap-south-1). Same GitHub Actions pipeline as A. Effort human ~1 day / CC ~30 min.
+
+State: approved
+Actual answer: A) Cloudflare Pages + Mumbai (recommended), user answer to D10
+Accepted scope: Frontend on Cloudflare Pages with a preview per PR; Supabase project in Mumbai (ap-south-1). GitHub Actions: on PR run unit tests, start local Supabase, apply migrations, run RLS isolation tests; on merge to main apply migrations, then deploy frontend. CLI commands verified against `supabase --help` before writing.
+History: none
+
+### R8: Ledger entries are insert-only on sync (CQ1)
+Finding: CQ1, P1, confidence 8/10, docs/designs/drukstock-core-design.md:78 ("Uploads are idempotent upserts keyed on that UUID, so a retry never duplicates an entry"), reviewer: plan-eng-review (Section 2)
+Plan baseline: idempotent upsert by UUID for every record (office-hours D6, D3 accepted scope); corrections are reversal entries, "Nothing is ever deleted" (doc:94).
+Runtime evidence: none (no code). An upsert (`ON CONFLICT DO UPDATE`) on entries would let a retried upload carrying a different amount, or a client bug, silently overwrite a recorded entry, which contradicts the append-only ledger.
+Comparison grid:
+| Choice | Current | A | B |
+|---|---|---|---|
+| R8 entry write semantics | upsert (implied update on conflict) | entries: `INSERT ... ON CONFLICT (id) DO NOTHING`; if the existing row's content differs from the upload, the push is rejected for that row and logged as a sync conflict shown to the owner; customers/settings keep last-write-wins upsert | keep upsert for entries too |
+Question D11:
+D11 — Make recorded credit entries impossible to overwrite during sync?
+Project/branch/task: DrukStock Core on main, Phase 0 sync write path (doc line 78).
+ELI10: Every entry has a unique ID so that re-sending it after a dropped connection doesn't create a duplicate. But the plan's "upsert" also means a re-send with different numbers would quietly replace the original, so a Nu 340 credit could become Nu 34 with no trace. The fix: the server only ever adds new entries; if the same ID arrives with different content, it refuses and flags it.
+Stakes if we pick wrong: a sync bug can silently change amounts in the ledger, and the owner has no way to notice.
+Recommendation: A because the whole product promise is a ledger that can't be quietly altered.
+Completeness: A=10/10, B=5/10
+Pros / cons:
+A) Insert-only + conflict flag (recommended)
+  ✅ A recorded entry can never change; corrections stay visible reversals
+  ✅ Mismatched re-sends surface as a conflict instead of a silent overwrite
+  ❌ One conflict state to show and test (human: ~1 day / CC: ~25 min)
+B) Upsert for everything
+  ✅ One write rule for all tables; simplest sync code
+  ✅ Retries still never duplicate entries
+  ❌ Any buggy or altered re-send rewrites ledger history with no trace
+Net: A small conflict screen against silently editable books.
+Header: Entry writes
+Options:
+A) Insert-only + conflict flag (recommended)
+Ledger entries use INSERT ... ON CONFLICT (id) DO NOTHING; if the stored row differs from the uploaded one, that row is rejected and logged as a sync conflict the owner can see. Customers and settings keep last-write-wins upsert. Tests: identical re-send is a no-op; altered re-send is rejected and flagged; stored amount unchanged. Effort human ~1 day / CC ~25 min.
+B) Upsert for everything
+Entries, customers and settings all use upsert on UUID. Retries never duplicate; a re-send with different content overwrites the stored entry.
+
+State: approved
+Actual answer: A) Insert-only + conflict flag (recommended), user answer to D11
+Accepted scope: Ledger entries use INSERT ... ON CONFLICT (id) DO NOTHING; if the stored row differs from the uploaded one, that row is rejected and logged as a sync conflict the owner can see. Customers and settings keep last-write-wins upsert. Tests: identical re-send is a no-op; altered re-send is rejected and flagged; stored amount unchanged.
+History: none
+
+### R9: Store money as integer chhetrum (CQ2)
+Finding: CQ2, P2, confidence 7/10, docs/designs/drukstock-core-design.md:73 ("amount in Nu"), reviewer: plan-eng-review (Section 2)
+Plan baseline: entries carry an "amount in Nu"; type unspecified. Phase 2 needs 5% GST and rounding to whole Nu (doc Phase 2).
+Runtime evidence: none (no code). JavaScript numbers are binary floats (0.1 + 0.2 ≠ 0.3); summing hundreds of float amounts drifts, and 5% GST on prices with chhetrum produces fractional results.
+Comparison grid:
+| Choice | Current | A | B |
+|---|---|---|---|
+| R9 money type | unspecified "amount in Nu" | `amount_ch bigint` (chhetrum, 1 Nu = 100 Ch), always > 0, sign from entry type; all math in integers; display formats to Nu | `numeric(12,2)` in Postgres, JS uses a decimal library for arithmetic |
+Question D12:
+D12 — How should the app store money amounts?
+Project/branch/task: DrukStock Core on main, Phase 0 data model (doc line 73).
+ELI10: Computers store ordinary decimal numbers approximately, so adding many prices can end up a few chhetrum off, and GST at 5% makes fractions. Storing every amount as a whole number of chhetrum (Nu 340.50 = 34050) makes every sum exact. The app just shows it as Nu again.
+Stakes if we pick wrong: balances end up a few chhetrum off the paper ledger, and owners stop trusting the totals.
+Recommendation: A because whole-number chhetrum is exact everywhere with no extra library.
+Completeness: A=10/10, B=9/10
+Pros / cons:
+A) Integer chhetrum (recommended)
+  ✅ Exact sums on the phone and in Postgres with plain integers
+  ✅ No decimal library to ship in the PWA bundle
+  ❌ Every display and input must convert Nu ↔ Ch correctly (human: ~half day / CC: ~15 min)
+B) numeric(12,2) + decimal lib
+  ✅ Database values read naturally as Nu with two decimals
+  ✅ Exact in Postgres
+  ❌ Needs a decimal library in JS; forgetting it once reintroduces float drift
+Net: Exact integers everywhere, or exact decimals that depend on always using a library.
+Header: Money type
+Options:
+A) Integer chhetrum (recommended)
+Store amount_ch bigint (1 Nu = 100 Ch), always > 0, with sign from entry type (credit/payment/reversal). All arithmetic in integers; one shared formatter/parser converts Nu ↔ Ch. Tests: parsing "340.5" → 34050, sums exact over 1,000 entries. Effort human ~half day / CC ~15 min.
+B) numeric(12,2) + decimal lib
+Store numeric(12,2) Nu in Postgres; client arithmetic uses a decimal library. Tests: same sum exactness. Adds a JS dependency.
+
+State: approved
+Actual answer: B) numeric(12,2) + decimal lib, user answer to D12
+Accepted scope: Store numeric(12,2) Nu in Postgres; client arithmetic uses a decimal library. Tests: same sum exactness. Adds a JS dependency.
+History: none
+
+### R10: Define overpayment and reversal rules (CQ3)
+Finding: CQ3, P2, confidence 7/10, docs/designs/drukstock-core-design.md:89 ("Payments are allocated FIFO against the oldest unpaid credits") and the Corrections bullets ("Tapping an entry in the history and choosing "Correct" creates a reversal entry"), reviewer: plan-eng-review (Section 2)
+Plan baseline: FIFO allocation; corrections are reversal entries (office-hours D6). Behavior when a payment exceeds the balance, and whether a reversal can itself be reversed or an entry reversed twice, are unspecified.
+Runtime evidence: none (no code).
+Comparison grid:
+| Choice | Current | A | B |
+|---|---|---|---|
+| R10 overpayment | unspecified | allowed; a negative balance is shown as "Advance Nu X"; FIFO applies the advance to the next credits; debt age counts only unpaid credits | blocked: a payment larger than the balance is refused at entry |
+| R10 reversal rules | unspecified | only an original credit/payment can be reversed, at most once; reversal entries cannot be reversed (re-record instead); enforced on client and by a DB unique constraint on `reverses_id` | same rules |
+Question D13:
+D13 — What happens when a customer pays more than they owe?
+Project/branch/task: DrukStock Core on main, Phase 1 credit rules (doc line 89).
+ELI10: Sometimes a customer pays Nu 500 when they owe Nu 340, leaving the shop holding Nu 160 for them. The plan doesn't say what the app does then. Option A records it and shows "Advance Nu 160", which is used up by their next purchases. Option B refuses any payment bigger than the debt. Both options also fix a second gap the same way: you can only undo an original entry, once, so undo-of-an-undo can't scramble the history.
+Stakes if we pick wrong: B stops owners from recording real advance payments; A without rules could show confusing negative balances.
+Recommendation: A because shops really do take advances, and the ledger should record what happened.
+Completeness: A=10/10, B=7/10
+Pros / cons:
+A) Allow advances (recommended)
+  ✅ Records real-world advance payments exactly as they happen
+  ✅ Advance automatically pays down the customer's next credits
+  ❌ Advance display and FIFO-with-advance tests to build (human: ~1 day / CC: ~25 min)
+B) Block overpayment
+  ✅ Balances never go negative; simpler screens
+  ✅ Less aging logic to test
+  ❌ An owner who received an advance can't record it, so the app disagrees with reality
+Net: Model advances honestly, or keep balances simple and lose real payments.
+Header: Overpayment
+Options:
+A) Allow advances (recommended)
+Payments larger than the balance are allowed; a negative balance shows as "Advance Nu X" and FIFO applies it to later credits; debt age counts only unpaid credits. Reversal rules: only original credits/payments can be reversed, each at most once (unique constraint on reverses_id); reversals can't be reversed. Tests: overpay then new credit; double-reverse rejected. Effort human ~1 day / CC ~25 min.
+B) Block overpayment
+A payment larger than the current balance is refused at entry. Same reversal rules as A (only originals, at most once, unique reverses_id). Tests: overpay refused; double-reverse rejected.
+
+State: approved
+Actual answer: A) Allow advances (recommended), user answer to D13
+Accepted scope: Payments larger than the balance are allowed; a negative balance shows as "Advance Nu X" and FIFO applies it to later credits; debt age counts only unpaid credits. Reversal rules: only original credits/payments can be reversed, each at most once (unique constraint on reverses_id); reversals can't be reversed. Tests: overpay then new credit; double-reverse rejected.
+History: none
+
+### Section 3 (Tests): coverage map
+
+Test framework: none detected (repo has docs only; no package.json, no test files). Evidence kind: static read of the plan; every path is proposed, so every row is a GAP by definition.
+
+```
+CODE PATHS (proposed)                                   USER FLOWS (proposed)
+[+] db/ schema + triggers + RLS                          [+] First run
+  ├── change_seq trigger (D6)                              ├── [GAP] [→E2E] OTP signup → set PIN → shop settings
+  │   ├── [GAP] insert/update bump, per-shop order         └── [GAP]        OTP not delivered → WhatsApp path (D4 result)
+  │   └── [GAP] concurrent writes: no gaps, no skips     [+] Counter entry (offline)
+  ├── RLS policies + sync_push SECURITY INVOKER (D8)       ├── [GAP] [→E2E] offline credit → reconnect → synced badge clears
+  │   ├── [GAP] own-shop insert/read allowed               ├── [GAP] [→E2E] new customer with existing phone → "use them?"
+  │   ├── [GAP] cross-shop insert/update/read refused      ├── [GAP]        double-tap "Gave credit" → one entry
+  │   └── [GAP] reuse another shop's UUID refused          └── [GAP]        storage not persisted → banner (D5)
+  ├── entries insert-only (D11)                          [+] Corrections & merge
+  │   ├── [GAP] identical re-send = no-op                  ├── [GAP]        correct entry → reversal shown struck-through
+  │   └── [GAP] altered re-send rejected + conflict        ├── [GAP]        reverse a reversal → refused (D13)
+  └── reverses_id unique (D13)                             └── [GAP] [→E2E] merge Karma2→Karma1 while phone 2 offline
+      └── [GAP] second reversal of same entry refused                       records on Karma2 → shows under Karma1 (D7)
+[+] client/ sync                                         [+] Reminders
+  ├── outbox push with retry/backoff                       ├── [GAP]        wa.me link: E.164, template, mBoB filled
+  │   ├── [GAP] network drop mid-push → retry, no dupes    └── [GAP]        customer without phone → Remind disabled
+  │   └── [GAP] conflict response → conflict list        [+] App lock
+  ├── pull since change_seq cursor                         ├── [GAP]        5 wrong PINs → 30 s lock, doubling (D9)
+  │   └── [GAP] cursor advances only after apply           └── [GAP]        10 wrong PINs → OTP required, data intact
+  └── persist() on first tap (D5)                        [+] Export
+      └── [GAP] denied → banner while outbox non-empty     └── [GAP]        CSV export: all customers, balances exact
+[+] client/ ledger math (pure)
+  ├── balance = decimal sum (D12)  [GAP] exact over 1,000 entries
+  ├── FIFO aging + advances (D13)  [GAP] overpay → advance → next credit consumes it
+  ├── merged_into chains (D7)      [GAP] A→B→C chain resolves; balance/aging equal before & after merge
+  └── Nu parse/format              [GAP] "340.5", "1,200", "", "-5", "abc"
+
+COVERAGE: 0/30 paths tested (0%; no code yet) | Code paths: 0/16 | User flows: 0/14 | GAPS: 30 (4 E2E)
+QUALITY: n/a until code exists
+```
+Legend: [GAP] = no test yet | [→E2E] = needs an end-to-end test across browser + Supabase
+
+Tests made obsolete by this plan: none (no existing tests).
+
+### R11: Test stack and E2E depth (T1)
+Finding: T1, P1, confidence 9/10, coverage map above (0/30 paths, no framework), reviewer: plan-eng-review (Section 3)
+Plan baseline: no test framework named; approved decisions D5-D13 each carry required tests (carried forward as required proof, not re-asked).
+Runtime evidence: `ls package.json` → not found; `git ls-files | grep -cE '(test|spec)'` → 0.
+Comparison grid:
+| Choice | Current | A | B |
+|---|---|---|---|
+| R11 unit/logic tests | none | Vitest for client ledger math, sync client, PIN lock | Vitest (same) |
+| R11 database tests | none | pgTAP via local Supabase for triggers, RLS isolation, insert-only, reverses_id | pgTAP (same) |
+| R11 E2E depth | none | Playwright for the 4 [→E2E] flows, with offline emulation, against local Supabase, in CI | no E2E; those 4 flows are checked manually before each pilot |
+| Required proof from D5-D13 | carried forward | included | included |
+Question D14:
+D14 — Which test tools, and do the 4 end-to-end flows get automated tests?
+Project/branch/task: DrukStock Core on main, test plan for Phase 0-1 (coverage map: 0/30 paths, no framework yet).
+ELI10: Nothing is built yet, so we pick the testing tools now. Both options use Vitest for app logic (balances, aging, sync) and database tests (pgTAP) for the privacy and no-overwrite rules you approved. The question is whether the 4 most important full journeys (signup, offline entry then sync, duplicate phone check, merge while another phone is offline) get automated browser tests that run on every change, or are checked by hand before each pilot.
+Stakes if we pick wrong: without automated end-to-end tests, a sync change can break offline entry and you'd find out at a shop counter.
+Recommendation: A because offline sync crosses browser, storage and server, exactly where unit tests miss real failures.
+Completeness: A=10/10, B=7/10
+Pros / cons:
+A) Vitest + pgTAP + Playwright (recommended)
+  ✅ The 4 riskiest journeys run automatically on every pull request
+  ✅ Offline emulation tests the exact failure the product exists to survive
+  ❌ Playwright in CI adds ~3-5 min per run (human: ~1 wk / CC: ~2 hrs)
+B) Vitest + pgTAP, manual E2E
+  ✅ Faster CI and fewer moving parts to maintain
+  ✅ All approved rules still have unit and database tests
+  ❌ Offline-to-sync regressions are only caught by hand, if someone remembers
+Net: A few CI minutes against catching sync regressions before a shopkeeper does.
+Header: Test stack
+Options:
+A) Vitest + pgTAP + Playwright (recommended)
+Vitest for client logic; pgTAP on local Supabase for triggers, RLS, insert-only and reverses_id; Playwright with offline emulation for the 4 E2E flows (signup, offline entry → sync, duplicate phone, merge while offline), all in GitHub Actions. Includes every test required by D5-D13. Effort human ~1 wk / CC ~2 hrs.
+B) Vitest + pgTAP, manual E2E
+Vitest and pgTAP as in A, including every test required by D5-D13. The 4 E2E flows are a manual checklist run before each pilot install. No Playwright.
+
+State: approved
+Actual answer: A) Vitest + pgTAP + Playwright (recommended), user answer to D14
+Accepted scope: Vitest for client logic; pgTAP on local Supabase for triggers, RLS, insert-only and reverses_id; Playwright with offline emulation for the 4 E2E flows (signup, offline entry → sync, duplicate phone, merge while offline), all in GitHub Actions. Includes every test required by D5-D13.
+History: none
+
+### R12: Page the pull (P1)
+Finding: P1, P2, confidence 7/10, docs/designs/drukstock-core-design.md:77 ("pull of changes since a cursor"), reviewer: plan-eng-review (Section 4)
+Plan baseline: pull rows with change_seq > cursor ordered by change_seq (D6); no page size. Index (shop_id, change_seq) added as required implementation of D6.
+Runtime evidence: none (no code). Scale [estimated]: a grocer with 200 credit customers and ~300 entries per customer per year ≈ 60,000 rows after a year; a new or reset phone would request all of them in one response.
+Comparison grid:
+| Choice | Current | A | B |
+|---|---|---|---|
+| R12 pull page size | unbounded | 500 rows per request, ordered by change_seq; the client applies each page and saves the cursor after it, then requests the next until a short page | unbounded single response |
+Question D15:
+D15 — Download a shop's history in pages instead of all at once?
+Project/branch/task: DrukStock Core on main, Phase 0 sync pull (doc line 77).
+ELI10: When an owner sets up a new phone, it downloads every past entry. After a year a busy shop could have around 60,000 entries [estimated]. Asking for all of them in one go can time out on a weak mobile connection and start over from zero each time. Fetching 500 at a time and saving progress after each batch means a dropped connection only loses the current batch.
+Stakes if we pick wrong: a new or replaced phone may never finish its first sync on a slow connection, so the owner can't see their book.
+Recommendation: A because paged pulls resume after a dropped connection and cost a loop.
+Completeness: A=10/10, B=5/10
+Pros / cons:
+A) 500-row pages (recommended)
+  ✅ A dropped connection resumes from the last saved page, not from zero
+  ✅ Bounded memory and response size on low-end phones
+  ❌ A loop and a resume test to write (human: ~half day / CC: ~15 min)
+B) One unbounded response
+  ✅ Simplest code; one request per pull
+  ✅ Fine for small or new shops with few entries
+  ❌ Large first syncs can time out and restart forever on weak connections
+Net: A small loop against first syncs that never finish.
+Header: Pull paging
+Options:
+A) 500-row pages (recommended)
+Pull returns at most 500 rows ordered by change_seq; the client applies each page and saves the cursor after it, then requests the next page until fewer than 500 arrive. Test: interrupted pull resumes from the saved cursor without gaps or duplicates. Effort human ~half day / CC ~15 min.
+B) One unbounded response
+Pull returns all rows with change_seq > cursor in one response. No paging or resume.
+
+State: approved
+Actual answer: A) 500-row pages (recommended), user answer to D15
+Accepted scope: Pull returns at most 500 rows ordered by change_seq; the client applies each page and saves the cursor after it, then requests the next page until fewer than 500 arrive. Test: interrupted pull resumes from the saved cursor without gaps or duplicates.
+History: none
+
+### R13: Keep a local balance cache (P2)
+Finding: P2, P2, confidence 6/10 (medium confidence, verify this is actually an issue), docs/designs/drukstock-core-design.md:75 ("Balances are derived from entries, never stored as a mutable total"), reviewer: plan-eng-review (Section 4)
+Plan baseline: balances derived from entries (office-hours D6); FIFO aging with advances (D13); merged_into aggregation (D7); decimal-library arithmetic (D12).
+Runtime evidence: none (no code). Scale [estimated]: ~60,000 entries after a year; Credit home needs balance + oldest-unpaid date for ~200 customers; recomputing FIFO over every entry with a decimal library on each open of a low-end Android phone may take seconds. Unmeasured.
+Comparison grid:
+| Choice | Current | A | B |
+|---|---|---|---|
+| R13 Credit home computation | full recompute from all entries on every view | client-side cache per customer (balance, oldest-unpaid date, advance) updated incrementally on each local append; fully rebuilt for affected customers after a pull page or merge; the cache is disposable, never synced, never the source of truth | full recompute kept; investigation only: time Credit home with 60,000 seeded entries on a low-end Android phone before the pilot; the cache stays an open decision (re-asked with the measurement), not approved |
+Question D16:
+D16 — Cache each customer's balance on the phone so the home screen opens fast?
+Project/branch/task: DrukStock Core on main, Phase 1 Credit home (doc line 75).
+ELI10: The app never stores a balance as the truth; it adds up entries. That's good for trust, but after a year the home screen would re-add tens of thousands of entries [estimated] every time it opens, which can feel slow on a cheap phone. A throwaway cache on the phone keeps each customer's total and updates it as entries are added, and can be rebuilt from entries any time. Option B measures first.
+Stakes if we pick wrong: a slow home screen at a busy counter sends the owner back to the paper book; a buggy cache shows wrong totals.
+Recommendation: B because the slowness is an estimate, and a cache adds a second place where a balance could be wrong.
+Completeness: A=9/10, B=8/10
+Pros / cons:
+A) Local balance cache
+  ✅ Home screen stays instant regardless of history size
+  ✅ Rebuildable from entries, so it never replaces the ledger as truth
+  ❌ Cache invalidation on pulls and merges is a new bug surface (human: ~2 days / CC: ~40 min)
+B) Measure first (recommended)
+  ✅ No second source of balances unless proven necessary
+  ✅ A seeded 60,000-entry test on a low-end phone gives a real number
+  ❌ If it is slow, the cache needs a second decision and lands later
+Net: Build a cache now on an estimate, or measure and build only if needed.
+Header: Balance cache
+Options:
+A) Local balance cache
+Client keeps per-customer balance, oldest-unpaid date and advance, updated incrementally on each local append and rebuilt for affected customers after each pull page or merge. Never synced, never the source of truth. Test: cache equals full recompute after randomized appends, pulls and merges. Effort human ~2 days / CC ~40 min.
+B) Measure first (recommended)
+Keep full recompute. Before the pilot, seed 60,000 entries / 200 customers and time Credit home on a low-end Android phone. The result reopens this decision; no cache is approved by this option. Effort human ~half day / CC ~20 min for the benchmark.
+
+State: approved
+Actual answer: A) Local balance cache, user answer to D16
+Accepted scope: Client keeps per-customer balance, oldest-unpaid date and advance, updated incrementally on each local append and rebuilt for affected customers after each pull page or merge. Never synced, never the source of truth. Test: cache equals full recompute after randomized appends, pulls and merges.
+History: none
