@@ -1,0 +1,14 @@
+{
+  "name": "drukstock-demo",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "big.js": "^6.2.2"
+  },
+  "devDependencies": {
+    "vitest": "^3.2.7"
+  }
+}

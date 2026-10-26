@@ -1,0 +1,22 @@
+{
+  "note": "Starting data for the interview demo. Days are counted back from the demo's start date. Totals: Nu 12,480 owed; Karma Dorji (41 days) and Tashi Lhamo (35 days) start overdue.",
+  "customers": [
+    { "id": "c1", "name": "Karma Dorji" },
+    { "id": "c2", "name": "Pema Choden" },
+    { "id": "c3", "name": "Sonam Wangmo" },
+    { "id": "c4", "name": "Tashi Lhamo" },
+    { "id": "c5", "name": "Dechen Wangmo" },
+    { "id": "c6", "name": "Ugyen Tshering" }
+  ],
+  "entries": [
+    { "id": "f1", "customerId": "c1", "type": "credit", "amount": "2400", "daysAgo": 41 },
+    { "id": "f2", "customerId": "c1", "type": "credit", "amount": "1390", "daysAgo": 12 },
+    { "id": "f3", "customerId": "c2", "type": "credit", "amount": "1500", "daysAgo": 20 },
+    { "id": "f4", "customerId": "c2", "type": "credit", "amount": "1150", "daysAgo": 6 },
+    { "id": "f5", "customerId": "c2", "type": "payment", "amount": "500", "daysAgo": 4 },
+    { "id": "f6", "customerId": "c3", "type": "credit", "amount": "1320", "daysAgo": 14 },
+    { "id": "f7", "customerId": "c4", "type": "credit", "amount": "980", "daysAgo": 35 },
+    { "id": "f8", "customerId": "c5", "type": "credit", "amount": "2890", "daysAgo": 25 },
+    { "id": "f9", "customerId": "c6", "type": "credit", "amount": "1350", "daysAgo": 3 }
+  ]
+}
