@@ -59,7 +59,7 @@ An independent Claude subagent (cold read):
 **Build shape:**
 - One static site in `site/` (separate from the app), deployed to Cloudflare Pages.
 - A shared demo engine (pure JS: fake ledger state, balance math, a 30-day skip, logging), with two renderers: 3D and flat.
-- **Engine rules (eng review D27, mirroring the app):** Nu amounts use a decimal library; overpayment is allowed and shown as "Advance Nu X", applied FIFO; "Correct" creates a reversal shown struck through, each entry reversible once. An empty or 0 amount disables both buttons; amounts above Nu 9,99,999 are rejected. The demo ledger lives in memory only (reload or Reset restores the fixture); only the founder log persists. All 6 starting customers live in `site/fixtures/customers.json`. **Visibility (eng review D37):** the main screen shows only the customer list, keypad, "Gave credit" and "Got payment"; "Correct" appears only after an entry in a customer's history is tapped, and "Advance Nu X" appears only as a balance label when it happens.
+- **Engine rules (eng review D27, mirroring the app):** Nu amounts use a decimal library; overpayment is allowed and shown as "Advance Nu X", applied FIFO; "Correct" creates a reversal shown struck through, each entry reversible once. An empty or 0 amount disables both buttons; amounts above Nu 9,99,999 are rejected. During an interview the demo ledger, demo clock, first-credit flag, timer state and tap count are saved to IndexedDB after each change; a reload returns to the list with them restored and marks the session reloaded=yes, excluded from the decision rule; "Next shopkeeper" clears them (eng re-review ER-D11, amending the original in-memory-only rule). The founder log persists as before. All 6 starting customers live in `site/fixtures/customers.json`. **Visibility (eng review D37, adapted to design D6's two screens):** the list screen shows the customer rows plus, after the first credit, "One month later →" and "Done" (design D10, D12); the customer page shows the header, amount, keypad, "Gave credit" and "Got payment"; "Correct" appears only after an entry in a customer's history is tapped, and "Advance Nu X" appears only as a balance label when it happens.
 - **Before building the 3D renderer (eng review D23):** a 2-hour throwaway spike measures the Three.js scene's gzipped size and frame rate on the founder's phone; the renderer choice is reopened with those numbers.
 - 3D renderer: a single small Three.js scene (counter, shelf and notebook built in code from simple shapes and textured with real photos the founder takes in a Thimphu shop, with permission; no model file, per eng review D33), loaded only for the 3D variant and only for the opening and transition (see Demo Spec). Budgets are defined in the Demo Spec.
 - **Service worker (eng review D24):** the install step precaches every asset of both variants; the founder start screen shows "Offline ready · build <hash>" only once that finishes. The cache name includes the build hash; a new worker precaches, then calls `skipWaiting()` and `clients.claim()` and deletes old caches. Required test: after one online visit, in airplane mode, both `?v=3d` and `?v=flat` load fully.
@@ -73,7 +73,7 @@ An independent Claude subagent (cold read):
 **Variant assignment (R1-6).** The page alternates automatically by interview number (see Sessions and metrics): odd interviews are 3D and even interviews are flat. The founder log shows "Next: 3D / flat", with a one-tap override that works offline. `?v=3d` / `?v=flat` still force a variant. Each shopkeeper sees exactly one variant; if the founder shows the other one afterwards, that second session is marked `repeat` and excluded.
 
 **Sessions and metrics (R1-3).**
-- An interview starts when the founder taps "Hand over" and ends when the founder taps "Next shopkeeper". Reset and "Try again" inside an interview restart the demo but not the interview.
+- An interview starts when the founder taps "Hand over" and ends when the founder taps "Next shopkeeper". "Try again" returns to the list with entries and the demo clock kept (design D13); Reset lives only on the founder screens, and "Next shopkeeper" resets automatically (design D11).
 - **Time to first credit (eng review D34):** seconds from the shopkeeper's **first touch** anywhere on the opening screen after the founder's "Hand over" tap (the same event in both variants) to the first committed "Gave credit" with an amount above zero. The time from "Hand over" to that first touch is logged separately and never used by the decision rule.
 - **Interviews, not sessions, drive alternation:** the variant advances only when the founder taps **"Next shopkeeper"** in the log. Reload, Reset and "Try again" keep the same interview number and variant.
 - **Tap count:** taps between session start and that first credit.
@@ -94,20 +94,27 @@ An independent Claude subagent (cold read):
 **Overdue rule and starting data (R1-7).**
 - Six customers with Bhutanese names. Two start overdue: Karma Dorji, with unpaid credit dated 41 days ago, and Tashi Lhamo, at 35 days. The other four are under 30 days.
 - A customer is overdue when any credit is still unpaid more than 30 days after its date. Payments clear the oldest credits first, so a large enough payment can clear the flag.
-- "Skip 30 days" moves the demo clock forward 30 days on each tap. Reset restores the starting data and today's date.
+- "One month later →" (design D12, replacing "Skip 30 days") moves the injectable demo clock forward 30 days on each tap and shows the banner. Reset (founder screens only, design D11) restores the starting data and today's date.
+- **Timing rules (eng re-review):** time to first credit excludes the 3D opening transition (from its start until the list is tappable), which is logged separately as transition_ms; a skip tap during it is excluded from tap count (ER-D9). A "Try it" tap before the first 3D frame goes straight to the list with no transition and logs renderer=fallback; once the transition has started, the D29 1.5 s timer no longer applies, and a scene that fails mid-transition jumps to the list, also logged as fallback (ER-D10). The "Done" and "One month later" exclusions from timing are moot because both appear only after the first credit (OV-18).
 
 **Size budgets (R1-10).** Budgets are gzipped transfer size of everything each variant loads, including fonts, images, scripts, the model and the fallback image:
-- **3D variant: ≤ 500 KB** [estimated split: Three.js core ~170 KB gz, model ≤ 150 KB meshopt-compressed, rest ~180 KB];
+- **3D variant: ≤ 500 KB** (split per eng re-review ER-D13b: shared fonts 60 + app JS/CSS incl. HTML and sw.js 50 + fixture/QR 20, plus Three.js ≤180, render-3d.js ≤20, photo textures ≤120, fallback still ≤30 = 480 KB, 20 KB headroom; no model file per D33);
+- **Install files:** manifest + 192/512 + Apple touch icons ≤40 KB, precached but outside the per-variant page budgets (ER-D13b);
 - **flat variant: ≤ 150 KB**.
 - A CI check measures both on every PR and fails when either is over budget.
 
-**Labels (R1-11).** The headline, "Try it", "Gave credit", "Got payment" and the end-card line are bilingual, Dzongkha above English, with no language toggle. All other text is English. A native speaker writes and checks every Dzongkha string before the first interview. **Dzongkha rendering (amended by eng review D36):** a Tibetan-script webfont subset at build time that keeps every OpenType layout feature and every glyph those features can reach (not only the typed codepoints); a Playwright CI test screenshots each bilingual string and compares it with reference images the native speaker approved once. Originally: a subset to the glyphs in the fixed bilingual strings (estimated ≤ 20 KB gzipped), counted in both variant budgets and checked on the founder's phone before the first interview.
+**Labels (R1-11, list updated by eng re-review ER-D8).** The headline, "Try it", "Gave credit", "Got payment", "Done", "One month later →", "{n} days unpaid" (a template; screenshot checks render n = 35, 41, 71) and the end-card line are bilingual; numbers use 0-9 (tabular Plex) in both lines, pending the native speaker's confirmation. They are Dzongkha above English, with no language toggle. All other text is English. A native speaker writes and checks every Dzongkha string before the first interview. **Dzongkha rendering (amended by eng review D36):** a Tibetan-script webfont subset at build time that keeps every OpenType layout feature and every glyph those features can reach (not only the typed codepoints); a Playwright CI test screenshots each bilingual string and compares it with reference images the native speaker approved once. Originally: a subset to the glyphs in the fixed bilingual strings (estimated ≤ 20 KB gzipped for that simple subset; the D36 layout-preserving subset is re-measured before the fonts line is fixed, ER-D7), counted in both variant budgets and checked on the founder's phone before the first interview.
 
 **Eng re-review amendments.**
-- **Navigation (ER-D1):** one History API entry per screen; `popstate` moves within the app (customer page → list, end card → list). On the opening and list screens during an interview, back re-pushes and stays put; only the founder start screen lets back leave the app.
-- **Budget allocation (ER-D2):** both Plex weights are subset at build time to the Latin characters used (A-Z, a-z, tabular digits, Nu punctuation), alongside the D36 Jomolhari subset. CI checks gzipped lines: fonts ≤60 KB total, app JS+CSS ≤50 KB, fixture/QR/icons ≤20 KB, flat headroom ≥20 KB. The 3D variant adds Three.js and textures within its 500 KB. Plex sizes are [re-measure before gate].
+- **Navigation (ER-D5, superseding ER-D1):** every screen change uses `history.replaceState`; one guard entry is pushed when an interview starts (on the Hand over tap). Back: customer page → list; end card → list; list/opening → stays (guard re-armed on the next tap); founder log → the screen it was opened from; start screen → leaves the app. Done, Try again and Next shopkeeper replace, never push.
+- **Founder exit (ER-D4):** the two-finger 1.5 s hold also works on the opening, list and customer screens and opens the founder log for the current session, marked abandoned if no credit was committed.
+- **Test bypass (ER-D6):** a test-build-only flag treats the page as standalone so Playwright can start interviews; the production build strips it, and CI fails the deploy if it appears in the deployed bundle.
+- **Budget allocation (ER-D2):** both Plex weights are subset at build time to the characters actually used, generated from the real UI strings (incl. → ← · ● ? : + and digits), keeping the `tnum` feature (factual correction from outside voice finding 6), alongside the D36 Jomolhari subset. CI checks gzipped lines: fonts ≤60 KB total, app JS+CSS ≤50 KB, fixture/QR/icons ≤20 KB, flat headroom ≥20 KB. The 3D variant adds Three.js and textures within its 500 KB. Plex sizes are [re-measure before gate].
 - **Decimal library (ER-D3):** big.js (≈2.7 KB gzipped per its README) for all Nu arithmetic, also the planned library for the app client.
 - **Engine clock:** injectable demo clock (required by design D12 "One month later").
+- **Fonts line pending (ER-D7):** before T6, build the D36 Jomolhari subset for the current bilingual strings and record its gzipped size; the fonts ≤60 KB line and the flat budget reopen with that number.
+- **Customer page layout (ER-D12):** the keypad and the two stacked buttons are pinned to the bottom (safe-area aware); header, balance, amount, confirmation and history scroll above. Bilingual buttons grow in height (min 56px) instead of truncating. Test viewport: 360×640 CSS px at 130% text scale, plus the founder's real phone at its largest font; "Gave credit" must be fully visible without scrolling.
+- **Design freeze (ER-D14):** the D19/D20 starter tokens are frozen for all 10 interviews; /design-consultation runs after Phase 0.
 
 **Wireframe:** `/Users/test/Desktop/Druk_Stock/docs/designs/drukstock-demo-page-wireframe.png` (source: `drukstock-demo-page-wireframe.html` in the same folder).
 
@@ -1394,7 +1401,7 @@ Synthesized from this design review's findings. Each task derives from a specifi
 - [ ] **DT1 (P1, human: ~1h / CC: ~15min)** — tokens — Add the CSS variables and type scale from D19/D20 (forced light theme, themed selection/caret/focus)
   - Surfaced by: Pass 5 — D19, D20
   - Files: site/styles.css
-  - Verify: contrast unit test recomputes every text/background pair ≥7:1
+  - Verify: contrast unit test recomputes every text/background pair ≥7:1, excluding the decorative --rule lines and the 40% disabled state (factual correction, outside voice finding 15)
 - [ ] **DT2 (P1, human: ~half day / CC: ~30min)** — list + customer page — Split the demo into list screen and customer page with history (D6, D8)
   - Surfaced by: Pass 1 reopened — outside voice C1; Pass 2 — D8
   - Files: site/index.html, site/render-flat.js, site/render-3d.js
@@ -1522,18 +1529,149 @@ Actual answer: A) big.js (recommended), user answer to ER-D3
 Accepted scope: Use big.js for all Nu arithmetic in the demo engine (and record it as the planned library for the app client, core D12). Its gzipped size is counted in the app JS line of the ER-D2 budget.
 History: none
 
+### Outside Voice (eng re-review; native Claude Plan subagent, completed in ~3 min; Codex not installed)
+19 findings (1 Critical, 4 High, 9 Medium, 5 Low), shown to the user verbatim. Factual corrections applied without questions: 4 (ER tasks added), 6 (Plex character set built from the real strings, `tnum` kept: required to deliver ER-D2/D19), 10 and 13-stale (Demo Spec text aligned with D6/D11/D12/D13/D33), 15 (contrast test excludes decorative rules and disabled 40% states), 17 (core doc note), 18 (redundant exclusions noted), 19 (report regenerated).
+
+### ER-R4: Founder exit from any demo screen (OV-1)
+Plan baseline: two-finger hold only on end card and start screen (D38).
+Question ER-D4: How do you get out of an interview where no credit is recorded? Options: A) Founder hold everywhere (recommended); B) Show "Done" from the start.
+State: approved
+Actual answer: A) Founder hold everywhere (recommended), user answer to ER-D4
+Accepted scope: The two-finger 1.5 s hold (D38) also works on the opening, list and customer screens; it opens the founder log for the current session with abandoned=yes if no credit was committed, from which "Next shopkeeper" proceeds as usual. Test: hold on the list with no credit → log shows the session as abandoned.
+History: Changes D38's "never on demo screens" on concrete new evidence (abandoned sessions could not be logged).
+
+### ER-R5: Two-entry history (OV-2, reopens ER-D1)
+Plan baseline: ER-D1 one pushed entry per screen; popstate re-pushes on list/opening.
+Question ER-D5: Change how the back gesture is handled? Options: A) Replace + one guard (recommended); B) Keep ER-D1 as approved.
+State: approved
+Actual answer: A) Replace + one guard (recommended), user answer to ER-D5
+Accepted scope: Every screen change uses history.replaceState; one guard entry is pushed when an interview starts (on the user's Hand over tap). Back rules: customer page → list; end card → list; list/opening → stays (guard re-armed on the next tap); founder log → the screen it was opened from; start screen → leaves the app. Done, Try again and Next shopkeeper replace, never push. Tests: Playwright goBack() plus a manual double-back check on the founder's phone (Android or iOS, whichever it is).
+History: Supersedes ER-D1's accepted scope (one entry per screen; re-push on popstate) on new evidence: user-gesture-less pushes are skipped by browsers, and entries accumulated across interviews.
+
+### ER-R6: Test-only standalone bypass (OV-3)
+Plan baseline: Hand over only in standalone mode (D35); browser tests required by D24-D39 and design D3-D21.
+Question ER-D6: How can browser tests start an interview? Options: A) Test-only bypass + live check (recommended); B) Test only what's reachable.
+State: approved
+Actual answer: A) Test-only bypass + live check (recommended), user answer to ER-D6
+Accepted scope: A build flag (test builds only) treats the page as standalone so Playwright can start interviews; the production build strips it, and CI fails the deploy if the flag's code or string appears in the deployed bundle. The standalone gate itself gets one manual check on the founder's phone.
+History: none
+
+### ER-R7: Measure the D36 Jomolhari subset first (OV-5)
+Question ER-D7: see the session brief (outside voice re-review).
+State: approved
+Actual answer: A) Measure first (recommended), user answer to ER-D7
+Accepted scope: Investigation only: before T6, build the D36 layout-preserving Jomolhari subset for the current bilingual strings (incl. Done, One month later, N days unpaid) and record its gzipped size; the fonts line (≤60 KB) and flat budget reopen with the number. No budget change approved now.
+History: none
+
+### ER-R8: Digits in Dzongkha labels (OV-7)
+Question ER-D8: see the session brief (outside voice re-review).
+State: approved
+Actual answer: B) Ordinary 0-9 (recommended), user answer to ER-D8
+Accepted scope: Numbers in both the Dzongkha and English lines use 0-9 from Plex (tabular). The bilingual label list becomes: headline, Try it, Gave credit, Got payment, Done, One month later →, "{n} days unpaid" (template), end-card line. Screenshot checks render the template at n=35, 41, 71. The native speaker confirms this choice.
+History: none
+
+### ER-R9: Exclude the 3D transition from timing (OV-8)
+Question ER-D9: see the session brief (outside voice re-review).
+State: approved
+Actual answer: A) Pause timer during animation (recommended), user answer to ER-D9
+Accepted scope: Time to first credit excludes the interval from the opening transition's start until the list is tappable (D15/D18); that interval is logged separately as transition_ms. A skip tap during the transition is excluded from tap count. Flat has no transition. Test: a 3D session's measured time equals touch-to-credit minus transition_ms.
+History: none
+
+### ER-R10: Try it before the first 3D frame (OV-9)
+Question ER-D10: see the session brief (outside voice re-review).
+State: approved
+Actual answer: A) Skip animation, log as fallback (recommended), user answer to ER-D10
+Accepted scope: A "Try it" tap before the first 3D frame goes straight to the list (no transition) and logs renderer=fallback for that session. Once the transition has started, the D29 1.5 s timer no longer applies; a scene that fails mid-transition jumps to the list, also logged as fallback. Test: tap Try it at 0 ms → list shown, session excluded.
+History: none
+
+### ER-R11: Reload mid-interview (OV-11)
+Question ER-D11: see the session brief (outside voice re-review).
+State: approved
+Actual answer: A) Save progress, flag reloaded (recommended), user answer to ER-D11
+Accepted scope: During an interview, the demo ledger, demo clock, first-credit flag, timer state and tap count are saved to IndexedDB after each change; a reload returns to the list with them restored and marks the session reloaded=yes (excluded from the decision rule). "Next shopkeeper" clears the saved demo state. Amends D27's in-memory-only rule for the duration of an interview.
+History: none
+
+### ER-R12: Gave credit always visible (OV-12)
+Question ER-D12: see the session brief (outside voice re-review).
+State: approved
+Actual answer: A) Pin keypad + buttons (recommended), user answer to ER-D12
+Accepted scope: Customer page: keypad and the two stacked buttons are fixed to the bottom (safe-area aware); header, balance, amount, confirmation and history scroll above. Bilingual buttons grow in height (min 56px) instead of truncating. Test viewport: 360×640 CSS px at 130% text scale, plus the founder's real phone at its largest font: "Gave credit" fully visible without scrolling.
+History: none
+
+### ER-R13: Install files and 3D budget lines (OV-13)
+Question ER-D13 then ER-D13b: see the session brief (outside voice re-review).
+State: approved
+Actual answer: A) Trim textures + still (recommended) [ER-D13b, correcting ER-D13 A], user answer to ER-D13 then ER-D13b
+Accepted scope: Install files (manifest + 192/512 + Apple touch icons) ≤40 KB outside page budgets; HTML+sw.js in app JS+CSS (≤50 KB). 3D lines: Three.js ≤180, render-3d.js ≤20, photo textures ≤120, fallback still ≤30; 3D total 480 KB ≤500 KB. Stale model/counter.glb references removed (D33). Re-measure after the D23 spike.
+History: ER-D13 A was answered first with lines summing to 520 KB (over 500 KB); the conflict was explained and ER-D13b re-asked with corrected numbers.
+
+### ER-R14: Design-consultation timing (OV-14)
+Question ER-D14: see the session brief (outside voice re-review).
+State: approved
+Actual answer: A) After the interviews (recommended), user answer to ER-D14
+Accepted scope: Build and run all 10 interviews on the D19/D20 starter tokens, frozen for Phase 0. Update TODOS.md: run /design-consultation after Phase 0, using the shop photos and interview notes; native-speaker screenshots, the font budget and the contrast test are redone then.
+History: none
+
+Approval readiness: PASS. Checked ER-R1 (ER-D1, superseded by ER-D5), ER-R2 (ER-D2), ER-R3 (ER-D3), ER-R4..ER-R14 (ER-D4..ER-D14, ER-D13b); each cites its own user answer. Open by design: renderer choice (D23 spike), fonts line (ER-D7 measurement).
+
+## Eng Re-review Implementation Tasks
+Each task derives from a re-review decision or a required-proof item. They extend T1-T10 and DT1-DT8.
+
+- [ ] **ET1 (P1, human: ~half day / CC: ~30min)** — navigation — Two-entry history (replaceState + one guard), per-screen back rules, founder two-finger exit on all demo screens
+  - Surfaced by: ER-D5, ER-D4
+  - Files: site/nav.js, site/index.html
+  - Verify: Playwright goBack() per screen; manual double-back on the founder's phone
+- [ ] **ET2 (P1, human: ~2h / CC: ~20min)** — test harness — Test-build-only standalone flag; CI fails the deploy if it's in the production bundle
+  - Surfaced by: ER-D6
+  - Files: scripts/build.mjs, .github/workflows/site.yml
+  - Verify: grep for the flag string in the deployed bundle returns nothing
+- [ ] **ET3 (P1, human: ~1h / CC: ~15min)** — fonts — Measure the D36 Jomolhari subset, then fix the fonts line; subset Plex from real UI strings keeping tnum
+  - Surfaced by: ER-D7, ER-D2, OV-6
+  - Files: scripts/subset-font.mjs, docs/designs/drukstock-demo-page-design.md
+  - Verify: recorded gzipped sizes; a CI glyph check over all UI strings
+- [ ] **ET4 (P1, human: ~2h / CC: ~20min)** — engine/log — big.js, injectable demo clock, IndexedDB interview state with reloaded flag, transition_ms exclusion, early-tap fallback rule
+  - Surfaced by: ER-D3, ER-D9, ER-D10, ER-D11, design D12
+  - Files: site/engine.js, site/log.js, tests/engine.test.js, tests/log.test.js
+  - Verify: `npx vitest run` (reload restore, transition exclusion, early tap → fallback)
+- [ ] **ET5 (P2, human: ~2h / CC: ~20min)** — layout — Pinned keypad + buttons; 360×640 @130% visibility test
+  - Surfaced by: ER-D12
+  - Files: site/styles.css, tests/layout.spec.ts
+  - Verify: Playwright asserts "Gave credit" is in the viewport
+- [ ] **ET6 (P2, human: ~1h / CC: ~10min)** — budgets — Per-part gzipped CI lines incl. install files and the 3D lines (ER-D2, ER-D13b); the spike also measures Hand over → first 3D frame
+  - Surfaced by: ER-D2, ER-D13b, required proof for D29
+  - Files: scripts/check-budget.mjs
+  - Verify: an over-budget fixture fails the named line
+- [ ] **ET7 (P3, human: ~15min / CC: ~5min)** — app plan note — Record big.js as the app client's decimal library in drukstock-core-design.md
+  - Surfaced by: ER-D3, OV-17
+  - Files: docs/designs/drukstock-core-design.md
+  - Verify: doc mentions big.js under core D12
+
+## Eng Re-review Completion Summary
+- Step 0: Scope Challenge — scope accepted as-is (D22 arrangement reused)
+- Reality rows: inherited from the first eng review (7/7); new premises: Plex and Jomolhari sizes [re-measure before gate]
+- Architecture Review: 3 issues found (ER-1 navigation, ER-2 font budget, ER-3 decimal library)
+- Code Quality Review: 0 new issues (design changes covered by required proof)
+- Test Review: required proof for design D5-D21 added to the QA test plan; 7 new edge cases
+- Performance Review: covered by ER-2/ER-D13b budget lines
+- Outside voice: native Claude Plan subagent completed (19 findings: 11 decisions ER-D4..ER-D14 incl. one corrected re-ask, 8 factual corrections); codex unavailable
+- Failure modes: 0 critical gaps after ER-D4 (abandoned sessions now loggable)
+- Unresolved decisions: 2 open by design (renderer after the D23 spike; fonts line after the ER-D7 measurement)
+- Parallelization: ET1/ET2 (nav, harness) parallel with ET4 (engine); ET3/ET6 after the measurement
+- Lake Score: 4/4 (ER-D1, ER-D2, ER-D5, ER-D6 each picked the 10/10 option; ER-D5 superseded ER-D1)
+
 ## GSTACK REVIEW REPORT
 
 | Review | Trigger | Why | Runs | Status | Findings |
 |--------|---------|-----|------|--------|----------|
 | CEO Review | `/plan-ceo-review` | Scope & strategy | 0 | — | — |
-| Outside Review | codex not installed; native Claude subagents (eng outside voice, design outside voice) | Independent 2nd opinion | 3 | unavailable (outside coverage); native fallbacks completed | eng: 12 findings dispositioned; design: 16 findings folded into D6-D21; core plan: 17 findings unresolved |
-| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 1 | ISSUES OPEN | 7 issues, 0 critical gaps |
+| Outside Review | codex not installed; native Claude subagents (2 eng outside voices, 1 design outside voice) | Independent 2nd opinion | 4 | unavailable (outside coverage); native fallbacks completed | eng: 12 + 19 findings, all dispositioned; design: 16 folded into D6-D21; core plan: 17 unresolved |
+| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 2 | ISSUES OPEN | 3 issues, 0 critical gaps (re-review); first run: 7 issues |
 | Design Review | `/plan-design-review` | UI/UX gaps | 1 | ISSUES OPEN | score: 1/10 → 7/10, 19 decisions |
 | DX Review | `/plan-devex-review` | Developer experience gaps | 0 | — | — |
 
-- **OUTSIDE COVERAGE:** codex: unavailable for the plan-review and design phases (CLI not installed). Native Claude subagents completed: eng outside voice (12 findings, resolved D31-D39 plus 2 corrections) and design outside voice (single-model, 16 findings folded into D6-D21). A separate native run on drukstock-core-design.md reported 17 findings that its paused review hasn't dispositioned yet.
-- **VERDICT:** no review CLEARED; eng review required (eng ISSUES OPEN with tasks T1-T10; design ISSUES OPEN at 7/10 pending token validation).
+- **OUTSIDE COVERAGE:** codex: unavailable for the plan-review and design phases (CLI not installed). Native Claude subagents completed: eng outside voice #1 (12 findings, D31-D39), design outside voice (16 findings, D6-D21), eng re-review outside voice (19 findings, ER-D4..ER-D14 plus 8 factual corrections). A separate native run on drukstock-core-design.md reported 17 findings that its paused review hasn't dispositioned yet.
+- **VERDICT:** no review CLEARED; eng review required (re-review ISSUES OPEN: tasks T1-T10, DT1-DT8, ET1-ET7; 2 decisions open by design).
 
 **UNRESOLVED DECISIONS:**
 - Renderer choice (Three.js as planned, slimmed, or CSS 3D) waits for the D23 spike's size and frame-rate numbers; task T9 is blocked on it.
+- The fonts ≤60 KB line (and the flat 150 KB budget) waits for the ER-D7 measurement of the D36 Jomolhari subset.
