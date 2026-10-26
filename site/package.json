@@ -5,12 +5,15 @@
   "scripts": {
     "test": "vitest run",
     "build": "node scripts/build.mjs",
-    "build:test": "node scripts/build.mjs --test"
+    "build:test": "node scripts/build.mjs --test",
+    "e2e": "playwright test",
+    "budget": "node scripts/check-budget.mjs"
   },
   "dependencies": {
     "big.js": "^6.2.2"
   },
   "devDependencies": {
+    "@playwright/test": "1.49",
     "vitest": "^3.2.7"
   }
 }
